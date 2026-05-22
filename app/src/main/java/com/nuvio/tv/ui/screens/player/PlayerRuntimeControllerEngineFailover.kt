@@ -139,7 +139,7 @@ private fun PlayerRuntimeController.targetEngineLabel(targetEngine: InternalPlay
     return when (targetEngine) {
         InternalPlayerEngine.EXOPLAYER -> context.getString(R.string.playback_engine_exoplayer)
         InternalPlayerEngine.MVP_PLAYER -> context.getString(R.string.playback_engine_mvplayer)
-        InternalPlayerEngine.VLC -> "VLC"
+        InternalPlayerEngine.VLC -> context.getString(R.string.playback_engine_vlc)
         InternalPlayerEngine.AUTO -> context.getString(R.string.playback_player_auto)
     }
 }

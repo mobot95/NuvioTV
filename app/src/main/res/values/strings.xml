@@ -575,6 +575,7 @@
     <string name="playback_internal_player_engine">Internal Engine</string>
     <string name="playback_engine_exoplayer">ExoPlayer</string>
     <string name="playback_engine_mvplayer">Libmpv (Beta)</string>
+    <string name="playback_engine_vlc">VLC</string>
     <string name="playback_auto_switch_internal_player_on_error">Auto-switch engine on startup error</string>
     <string name="playback_auto_switch_internal_player_on_error_sub">If stream startup fails, switch between ExoPlayer and libmpv automatically.</string>
     <string name="playback_section_audio">Audio &amp; Trailer</string>

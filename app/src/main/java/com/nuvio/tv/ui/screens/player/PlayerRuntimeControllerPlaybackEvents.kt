@@ -1292,7 +1292,7 @@ internal fun PlayerRuntimeController.buildStreamInfoData(): StreamInfoData {
         playerEngine = when (currentInternalPlayerEngine) {
             com.nuvio.tv.data.local.InternalPlayerEngine.EXOPLAYER -> context.getString(R.string.playback_engine_exoplayer)
             com.nuvio.tv.data.local.InternalPlayerEngine.MVP_PLAYER -> context.getString(R.string.playback_engine_mvplayer)
-            com.nuvio.tv.data.local.InternalPlayerEngine.VLC -> "VLC"
+            com.nuvio.tv.data.local.InternalPlayerEngine.VLC -> context.getString(R.string.playback_engine_vlc)
             com.nuvio.tv.data.local.InternalPlayerEngine.AUTO -> null
         }
     )
