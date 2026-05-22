@@ -205,6 +205,18 @@ internal fun PlayerRuntimeController.initializePlayer(
                 }
                 return@launch
             }
+            if (effectiveInternalPlayerEngine == InternalPlayerEngine.VLC) {
+                afrJob.await()
+                initializeVlcPlayer(
+                    url = url,
+                    headers = headers,
+                    allowEngineFailover = allowEngineFailover,
+                    startPaused = startPaused
+                )
+                fetchAddonSubtitles()
+                return@launch
+            }
+            val mimeTypeResolveStartTime = System.currentTimeMillis()
             resolveCurrentStreamMimeType(
                 url = url,
                 headers = headers

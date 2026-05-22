@@ -342,6 +342,7 @@ enum class PlayerPreference {
 enum class InternalPlayerEngine {
     EXOPLAYER,
     MVP_PLAYER,
+    VLC,
     AUTO
 }
 

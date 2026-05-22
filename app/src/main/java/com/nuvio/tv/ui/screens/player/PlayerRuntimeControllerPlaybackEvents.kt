@@ -54,12 +54,12 @@ internal fun PlayerRuntimeController.skipInterval(interval: SkipInterval): Boole
 
 internal fun PlayerRuntimeController.applyAudioAmplification(db: Int) {
     val clampedDb = db.coerceIn(AUDIO_AMPLIFICATION_MIN_DB, AUDIO_AMPLIFICATION_MAX_DB)
-    val isAudioAmplificationAvailable = isUsingMpvEngine() || _exoPlayer != null
+    val isAudioAmplificationAvailable = isUsingMpvEngine() || isUsingVlcEngine() || _exoPlayer != null
     val wasActive = gainAudioProcessor.isGainEnabled()
     gainAudioProcessor.setGainDb(if (isAudioAmplificationAvailable) clampedDb else AUDIO_AMPLIFICATION_MIN_DB)
     val isActiveNow = gainAudioProcessor.isGainEnabled()
 
-    if (wasActive != isActiveNow && !isUsingMpvEngine()) {
+    if (wasActive != isActiveNow && !isUsingMpvEngine() && !isUsingVlcEngine()) {
         playbackSpeedAwareAudioSink?.notifyAudioProcessingRequirementChanged()
         _exoPlayer?.let { player ->
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().build()
@@ -68,6 +68,9 @@ internal fun PlayerRuntimeController.applyAudioAmplification(db: Int) {
 
     if (isUsingMpvEngine()) {
         mpvView?.applyAudioAmplificationDb(clampedDb)
+    }
+    if (isUsingVlcEngine()) {
+        vlcView?.applyAudioAmplificationDb(clampedDb)
     }
     _uiState.update {
         it.copy(
@@ -90,7 +93,7 @@ internal fun PlayerRuntimeController.updateAudioControlAvailability(
     selectedAudioIndex: Int = _uiState.value.selectedAudioTrackIndex
 ) {
     val selectedTrack = audioTracks.getOrNull(selectedAudioIndex)
-    val isAudioAmplificationAvailable = isUsingMpvEngine() || _exoPlayer != null
+    val isAudioAmplificationAvailable = isUsingMpvEngine() || isUsingVlcEngine() || _exoPlayer != null
     val isCenterMixAvailable =
         ffmpegAudioRenderer?.isCenterMixActive() == true && (selectedTrack?.channelCount ?: 0) > 2
     val clampedDb = _uiState.value.audioAmplificationDb
@@ -130,6 +133,41 @@ internal fun PlayerRuntimeController.startProgressUpdates() {
     progressJob?.cancel()
     progressJob = scope.launch {
         while (isActive) {
+            if (isUsingVlcEngine()) {
+                // VLC playback state is handled by event callbacks, but we still need
+                // to update skip intervals and post-play overlay
+                val view = vlcView
+                if (view != null) {
+                    val pos = view.getCurrentPosition().coerceAtLeast(0L)
+                    val playerDuration = view.getDuration().coerceAtLeast(0L)
+                    if (playerDuration > lastKnownDuration) {
+                        lastKnownDuration = playerDuration
+                    }
+
+                    val committedTarget = vlcCommittedSeekTargetMs
+                    if (committedTarget != null && kotlin.math.abs(pos - committedTarget) <= 3000) {
+                        vlcCommittedSeekTargetMs = null
+                    }
+
+                    val displayPosition = pendingPreviewSeekPosition
+                        ?: vlcCommittedSeekTargetMs
+                        ?: pos
+                    updatePlaybackTimeline(
+                        currentPosition = displayPosition,
+                        duration = playerDuration
+                    )
+                    if (playerDuration > 0L) {
+                        updateActiveSkipInterval(pos)
+                        evaluatePostPlayOverlayVisibility(
+                            positionMs = pos,
+                            durationMs = playerDuration
+                        )
+                        tryAutoSelectPreferredSubtitleFromAvailableTracks()
+                    }
+                }
+                delay(500)
+                continue
+            }
             if (isUsingMpvEngine()) {
                 val view = mpvView
                 if (view != null) {
@@ -538,6 +576,9 @@ internal fun PlayerRuntimeController.adjustSubtitleDelay(deltaMs: Int, showOverl
     if (isUsingMpvEngine()) {
         mpvView?.setSubtitleDelayMs(newDelayMs)
     }
+    if (isUsingVlcEngine()) {
+        vlcView?.setSubtitleDelayMs(newDelayMs)
+    }
     if (showOverlay) {
         _uiState.update {
             it.copy(
@@ -627,7 +668,7 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
     onUserInteraction()
     when (event) {
         PlayerEvent.OnPlayPause -> {
-            if (isUsingMpvEngine()) {
+            if (isUsingMpvEngine() || isUsingVlcEngine()) {
                 val playing = isPlaybackCurrentlyPlaying()
                 if (playing) {
                     userPausedManually = true
@@ -837,6 +878,8 @@ fun PlayerRuntimeController.onEvent(event: PlayerEvent) {
         is PlayerEvent.OnSetPlaybackSpeed -> {
             if (isUsingMpvEngine()) {
                 setPlaybackSpeedInternal(event.speed)
+            } else if (isUsingVlcEngine()) {
+                vlcView?.setPlaybackSpeed(event.speed)
             } else {
                 _exoPlayer?.let { player ->
                     player.setPlaybackSpeed(event.speed)
@@ -1249,6 +1292,7 @@ internal fun PlayerRuntimeController.buildStreamInfoData(): StreamInfoData {
         playerEngine = when (currentInternalPlayerEngine) {
             com.nuvio.tv.data.local.InternalPlayerEngine.EXOPLAYER -> context.getString(R.string.playback_engine_exoplayer)
             com.nuvio.tv.data.local.InternalPlayerEngine.MVP_PLAYER -> context.getString(R.string.playback_engine_mvplayer)
+            com.nuvio.tv.data.local.InternalPlayerEngine.VLC -> "VLC"
             com.nuvio.tv.data.local.InternalPlayerEngine.AUTO -> null
         }
     )

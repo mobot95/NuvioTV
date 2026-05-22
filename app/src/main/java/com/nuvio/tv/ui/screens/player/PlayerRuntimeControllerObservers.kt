@@ -357,6 +357,8 @@ internal fun PlayerRuntimeController.observeSubtitleSettings() {
                 if (isUsingMpvEngine()) {
                     mpvView?.applyAudioLanguagePreferences(resolvedAudioLanguages)
                     updateMpvAvailableTracks()
+                } else if (isUsingVlcEngine()) {
+                    vlcView?.applyAudioLanguagePreferences(resolvedAudioLanguages)
                 }
             }
 

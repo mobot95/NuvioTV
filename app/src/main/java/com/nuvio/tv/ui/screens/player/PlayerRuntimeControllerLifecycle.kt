@@ -51,6 +51,7 @@ internal fun PlayerRuntimeController.releasePlayer(flushPlaybackState: Boolean) 
     stableProgressResetJob?.cancel()
     stableProgressResetJob = null
     releaseMpvPlayer()
+    releaseVlcPlayer()
     _exoPlayer?.let { player ->
         runCatching { player.playWhenReady = false }
         runCatching { player.pause() }

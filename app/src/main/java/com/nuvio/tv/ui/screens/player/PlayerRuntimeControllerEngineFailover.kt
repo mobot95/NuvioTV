@@ -20,6 +20,7 @@ internal fun PlayerRuntimeController.maybeAutoSwitchInternalPlayerOnStartupError
     val targetEngine = when (currentInternalPlayerEngine) {
         InternalPlayerEngine.EXOPLAYER -> InternalPlayerEngine.MVP_PLAYER
         InternalPlayerEngine.MVP_PLAYER -> InternalPlayerEngine.EXOPLAYER
+        InternalPlayerEngine.VLC -> InternalPlayerEngine.EXOPLAYER
         InternalPlayerEngine.AUTO -> if (mpvView != null) InternalPlayerEngine.EXOPLAYER else InternalPlayerEngine.MVP_PLAYER
     }
     beginSwitchTraceSession(reason = "startup-failover", targetEngine = targetEngine)
@@ -68,6 +69,7 @@ internal fun PlayerRuntimeController.switchInternalPlayerEngineManually() {
     val targetEngine = when (currentInternalPlayerEngine) {
         InternalPlayerEngine.EXOPLAYER -> InternalPlayerEngine.MVP_PLAYER
         InternalPlayerEngine.MVP_PLAYER -> InternalPlayerEngine.EXOPLAYER
+        InternalPlayerEngine.VLC -> InternalPlayerEngine.EXOPLAYER
         InternalPlayerEngine.AUTO -> if (mpvView != null) InternalPlayerEngine.EXOPLAYER else InternalPlayerEngine.MVP_PLAYER
     }
     beginSwitchTraceSession(reason = "manual-osd", targetEngine = targetEngine)
@@ -137,6 +139,7 @@ private fun PlayerRuntimeController.targetEngineLabel(targetEngine: InternalPlay
     return when (targetEngine) {
         InternalPlayerEngine.EXOPLAYER -> context.getString(R.string.playback_engine_exoplayer)
         InternalPlayerEngine.MVP_PLAYER -> context.getString(R.string.playback_engine_mvplayer)
+        InternalPlayerEngine.VLC -> "VLC"
         InternalPlayerEngine.AUTO -> context.getString(R.string.playback_player_auto)
     }
 }

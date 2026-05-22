@@ -44,7 +44,7 @@ internal fun PlayerRuntimeController.showSeekOverlayTemporarily() {
 internal fun PlayerRuntimeController.selectAudioTrack(trackIndex: Int) {
     logSwitchTrace(
         stage = "select-audio-track",
-        message = "trackIndex=$trackIndex usingMpv=${isUsingMpvEngine()} " +
+        message = "trackIndex=$trackIndex usingMpv=${isUsingMpvEngine()} usingVlc=${isUsingVlcEngine()} " +
             "track=${_uiState.value.audioTracks.getOrNull(trackIndex)?.let { "${it.language}/${it.name}/${it.trackId}" } ?: "none"}"
     )
     if (isUsingMpvEngine()) {
@@ -55,6 +55,11 @@ internal fun PlayerRuntimeController.selectAudioTrack(trackIndex: Int) {
         if (changed) {
             keepMpvPlayingIfNeeded(wasPlaying)
         }
+        return
+    }
+
+    if (isUsingVlcEngine()) {
+        selectVlcAudioTrack(trackIndex)
         return
     }
 
@@ -168,7 +173,7 @@ internal fun PlayerRuntimeController.applyAddonSubtitleOverrideByLanguage(
 internal fun PlayerRuntimeController.selectSubtitleTrack(trackIndex: Int) {
     logSwitchTrace(
         stage = "select-subtitle-track",
-        message = "trackIndex=$trackIndex usingMpv=${isUsingMpvEngine()} " +
+        message = "trackIndex=$trackIndex usingMpv=${isUsingMpvEngine()} usingVlc=${isUsingVlcEngine()} " +
             "track=${_uiState.value.subtitleTracks.getOrNull(trackIndex)?.let { "${it.language}/${it.name}/${it.trackId}/forced=${it.isForced}" } ?: "none"}"
     )
     if (isUsingMpvEngine()) {
@@ -184,6 +189,15 @@ internal fun PlayerRuntimeController.selectSubtitleTrack(trackIndex: Int) {
             updateMpvAvailableTracks()
             keepMpvPlayingIfNeeded(shouldKeepPlaying)
         }
+        return
+    }
+
+    if (isUsingVlcEngine()) {
+        Log.d(PlayerRuntimeController.TAG, "Selecting INTERNAL subtitle trackIndex=$trackIndex (vlc)")
+        selectVlcSubtitleTrack(trackIndex)
+        pendingAddonSubtitleLanguage = null
+        pendingAddonSubtitleTrackId = null
+        pendingAudioSelectionAfterSubtitleRefresh = null
         return
     }
 
@@ -256,7 +270,7 @@ internal fun PlayerRuntimeController.disableSubtitles() {
     resetSubtitleAutoSyncState()
     logSwitchTrace(
         stage = "disable-subtitles",
-        message = "usingMpv=${isUsingMpvEngine()} selectedSubtitleIndex=${_uiState.value.selectedSubtitleTrackIndex}"
+        message = "usingMpv=${isUsingMpvEngine()} usingVlc=${isUsingVlcEngine()} selectedSubtitleIndex=${_uiState.value.selectedSubtitleTrackIndex}"
     )
     if (isUsingMpvEngine()) {
         if (mpvView?.disableSubtitles() == true) {
@@ -270,6 +284,19 @@ internal fun PlayerRuntimeController.disableSubtitles() {
                 )
             }
             updateMpvAvailableTracks()
+        }
+        return
+    }
+    if (isUsingVlcEngine()) {
+        vlcView?.disableSubtitles()
+        pendingAddonSubtitleLanguage = null
+        pendingAddonSubtitleTrackId = null
+        pendingAudioSelectionAfterSubtitleRefresh = null
+        _uiState.update {
+            it.copy(
+                selectedAddonSubtitle = null,
+                selectedSubtitleTrackIndex = -1
+            )
         }
         return
     }
@@ -375,7 +402,7 @@ internal fun PlayerRuntimeController.toSubtitleConfiguration(subtitle: Subtitle)
 internal fun PlayerRuntimeController.selectAddonSubtitle(subtitle: Subtitle) {
     logSwitchTrace(
         stage = "select-addon-subtitle",
-        message = "usingMpv=${isUsingMpvEngine()} addonId=${subtitle.id} addonLang=${subtitle.lang} addonName=${subtitle.addonName}"
+        message = "usingMpv=${isUsingMpvEngine()} usingVlc=${isUsingVlcEngine()} addonId=${subtitle.id} addonLang=${subtitle.lang} addonName=${subtitle.addonName}"
     )
     if (isUsingMpvEngine()) {
         val currentlySelected = _uiState.value.selectedAddonSubtitle
@@ -408,6 +435,27 @@ internal fun PlayerRuntimeController.selectAddonSubtitle(subtitle: Subtitle) {
         }
         updateMpvAvailableTracks()
         keepMpvPlayingIfNeeded(wasPlaying)
+        return
+    }
+
+    if (isUsingVlcEngine()) {
+        val currentlySelected = _uiState.value.selectedAddonSubtitle
+        if (currentlySelected?.id == subtitle.id && currentlySelected.url == subtitle.url) {
+            return
+        }
+        Log.d(PlayerRuntimeController.TAG, "Selecting ADDON subtitle lang=${subtitle.lang} id=${subtitle.id} (vlc)")
+        val added = vlcView?.addExternalSubtitleUrl(subtitle.url, true) == true
+        if (added) {
+            pendingAddonSubtitleLanguage = null
+            pendingAddonSubtitleTrackId = null
+            pendingAudioSelectionAfterSubtitleRefresh = null
+            _uiState.update {
+                it.copy(
+                    selectedAddonSubtitle = subtitle,
+                    selectedSubtitleTrackIndex = -1
+                )
+            }
+        }
         return
     }
 

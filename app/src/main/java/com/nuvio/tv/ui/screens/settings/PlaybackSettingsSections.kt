@@ -247,6 +247,7 @@ internal fun PlaybackSettingsSections(
         internalEngineLabel = when (playerSettings.internalPlayerEngine) {
             InternalPlayerEngine.EXOPLAYER -> stringResource(R.string.playback_engine_exoplayer)
             InternalPlayerEngine.MVP_PLAYER -> stringResource(R.string.playback_engine_mvplayer)
+            InternalPlayerEngine.VLC -> "VLC"
             InternalPlayerEngine.AUTO -> stringResource(R.string.playback_player_auto)
         }
     )
@@ -1076,6 +1077,11 @@ private fun InternalPlayerEngineDialog(
             InternalPlayerEngine.MVP_PLAYER,
             stringResource(R.string.playback_engine_mvplayer),
             stringResource(R.string.playback_engine_mvplayer_desc)
+        ),
+        SettingsPickerOption(
+            InternalPlayerEngine.VLC,
+            "VLC",
+            "VLC Media Player - Fast MKV parsing with FFmpeg"
         ),
         SettingsPickerOption(
             InternalPlayerEngine.AUTO,

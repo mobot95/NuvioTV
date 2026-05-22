@@ -183,6 +183,13 @@ internal fun PlayerRuntimeController.pauseForLifecycle() {
         _uiState.update { it.copy(isPlaying = false) }
         return
     }
+    if (isUsingVlcEngine()) {
+        vlcView?.setPaused(true)
+        stopWatchProgressSaving()
+        stopProgressUpdates()
+        _uiState.update { it.copy(isPlaying = false) }
+        return
+    }
     _exoPlayer?.let { player ->
         // Disable automatic audio focus handling so ExoPlayer can't
         // re-acquire focus and set playWhenReady=true behind our back.
@@ -212,7 +219,7 @@ internal fun PlayerRuntimeController.resumeForLifecycle() {
     }
 
     val player = _exoPlayer
-    if (player != null && !isUsingMpvEngine()) {
+    if (player != null && !isUsingMpvEngine() && !isUsingVlcEngine()) {
         // Restore automatic audio focus handling that was disabled in pauseForLifecycle().
         player.setAudioAttributes(player.audioAttributes, true)
 
@@ -426,6 +433,8 @@ internal fun PlayerRuntimeController.isUsingMpvEngine(): Boolean {
 internal fun PlayerRuntimeController.currentPlaybackPositionMs(): Long? {
     return if (isUsingMpvEngine()) {
         mpvView?.currentPositionMs()
+    } else if (isUsingVlcEngine()) {
+        vlcCommittedSeekTargetMs ?: vlcView?.getCurrentPosition()
     } else {
         _exoPlayer?.currentPosition
     }
@@ -434,6 +443,8 @@ internal fun PlayerRuntimeController.currentPlaybackPositionMs(): Long? {
 internal fun PlayerRuntimeController.currentPlaybackDurationMs(): Long {
     return if (isUsingMpvEngine()) {
         mpvView?.durationMs() ?: 0L
+    } else if (isUsingVlcEngine()) {
+        vlcView?.getDuration() ?: 0L
     } else {
         _exoPlayer?.duration ?: 0L
     }
@@ -442,6 +453,8 @@ internal fun PlayerRuntimeController.currentPlaybackDurationMs(): Long {
 internal fun PlayerRuntimeController.isPlaybackCurrentlyPlaying(): Boolean {
     return if (isUsingMpvEngine()) {
         mpvView?.isPlayingNow() == true
+    } else if (isUsingVlcEngine()) {
+        vlcView?.isPlayingNow() == true
     } else {
         _exoPlayer?.isPlaying == true
     }
@@ -454,6 +467,10 @@ internal fun PlayerRuntimeController.seekPlaybackTo(positionMs: Long) {
             // Keep subtitle delay sticky during FF/RW seeks.
             view.setSubtitleDelayMs(_uiState.value.subtitleDelayMs)
         }
+    } else if (isUsingVlcEngine()) {
+        android.util.Log.d(PlayerRuntimeController.TAG, "[VLC] seekPlaybackTo called - positionMs=$positionMs")
+        vlcView?.seekTo(positionMs)
+        vlcCommittedSeekTargetMs = positionMs
     } else {
         _exoPlayer?.seekTo(positionMs)
     }
@@ -462,6 +479,8 @@ internal fun PlayerRuntimeController.seekPlaybackTo(positionMs: Long) {
 internal fun PlayerRuntimeController.setPlaybackSpeedInternal(speed: Float) {
     if (isUsingMpvEngine()) {
         mpvView?.setPlaybackSpeed(speed)
+    } else if (isUsingVlcEngine()) {
+        vlcView?.setPlaybackSpeed(speed)
     } else {
         _exoPlayer?.setPlaybackSpeed(speed)
     }
@@ -470,6 +489,9 @@ internal fun PlayerRuntimeController.setPlaybackSpeedInternal(speed: Float) {
 internal fun PlayerRuntimeController.setPlaybackPaused(paused: Boolean) {
     if (isUsingMpvEngine()) {
         mpvView?.setPaused(paused)
+        _uiState.update { it.copy(isPlaying = !paused) }
+    } else if (isUsingVlcEngine()) {
+        vlcView?.setPaused(paused)
         _uiState.update { it.copy(isPlaying = !paused) }
     } else {
         _exoPlayer?.let { player ->

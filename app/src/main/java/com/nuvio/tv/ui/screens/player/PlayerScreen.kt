@@ -655,6 +655,14 @@ fun PlayerScreen(
                 subtitleStyle = uiState.subtitleStyle,
                 modifier = Modifier.fillMaxSize()
             )
+        } else if (uiState.internalPlayerEngine == InternalPlayerEngine.VLC) {
+            VlcPlayerSurface(
+                viewModel = viewModel,
+                isPlaying = uiState.isPlaying,
+                isBuffering = uiState.isBuffering,
+                aspectMode = uiState.aspectMode,
+                modifier = Modifier.fillMaxSize()
+            )
         } else {
             viewModel.exoPlayer?.let { player ->
                 ExoPlayerSurface(
@@ -1279,6 +1287,43 @@ private fun MpvPlayerSurface(
 
     LaunchedEffect(mpvView, subtitleStyle) {
         mpvView.applySubtitleStyle(subtitleStyle)
+    }
+}
+
+@Composable
+private fun VlcPlayerSurface(
+    viewModel: PlayerViewModel,
+    isPlaying: Boolean,
+    isBuffering: Boolean,
+    aspectMode: AspectMode,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val vlcView = remember(context) {
+        NuvioVlcSurfaceView(context)
+    }
+
+    AndroidView(
+        factory = { vlcView },
+        modifier = modifier
+    )
+
+    DisposableEffect(viewModel, vlcView) {
+        viewModel.attachVlcView(vlcView)
+        onDispose {
+            viewModel.attachVlcView(null)
+        }
+    }
+
+    LaunchedEffect(vlcView, isPlaying, isBuffering) {
+        val shouldKeepScreenOn = isPlaying || isBuffering
+        if (vlcView.keepScreenOn != shouldKeepScreenOn) {
+            vlcView.keepScreenOn = shouldKeepScreenOn
+        }
+    }
+
+    LaunchedEffect(vlcView, aspectMode) {
+        vlcView.applyAspectMode(aspectMode)
     }
 }
 
