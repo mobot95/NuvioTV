@@ -324,7 +324,7 @@ class PlayerRuntimeController(
     internal var stillWatchingEpisodeThresholdSetting: Int =
         PlayerSettings.DEFAULT_STILL_WATCHING_EPISODE_THRESHOLD
     internal var mpvHardwareDecodeModeSetting: MpvHardwareDecodeMode = MpvHardwareDecodeMode.AUTO_SAFE
-    internal var mpvPreferredAudioLanguages: List<String> = emptyList()
+    internal var preferredAudioLanguages: List<String> = emptyList()
     internal var currentStreamBingeGroup: String? = navigationArgs.bingeGroup
     internal var hasInitializedAudioAmplificationForSession: Boolean = false
     internal var hasInitializedCenterMixForSession: Boolean = false
@@ -342,6 +342,7 @@ class PlayerRuntimeController(
     internal var vlcView: NuvioVlcSurfaceView? = null
     internal var mpvInitializationInProgress: Boolean = false
     internal var mpvTrackRefreshInProgress: Boolean = false
+    internal var vlcTrackRefreshJob: Job? = null
     internal var pendingMpvHardRestartOnNextAttach: Boolean = false
     internal var delayMpvResumeSeekUntilVideoTrack: Boolean = false
     internal var mpvDelayStartAfterAfrSwitch: Boolean = false
@@ -429,6 +430,7 @@ class PlayerRuntimeController(
 
     fun onCleared() {
         releasePlayer()
+        VlcInstanceProvider.cleanup()
         stopTorrentStream()
         mediaSourceFactory.shutdown()
         sourceChipErrorDismissJob?.cancel()

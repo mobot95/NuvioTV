@@ -20,6 +20,7 @@ import okio.Path.Companion.toOkioPath
 import com.nuvio.tv.core.runtime.PluginRuntimeHooks
 import com.nuvio.tv.core.sync.StartupSyncService
 import com.nuvio.tv.core.sync.androidtv.AndroidTvChannelSyncService
+import com.nuvio.tv.ui.screens.player.VlcInstanceProvider
 import dagger.hilt.android.HiltAndroidApp
 import okhttp3.Cookie
 import okhttp3.CookieJar
@@ -61,6 +62,8 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
 
     override fun onCreate() {
         super.onCreate()
+        // Pre-warm VLC instance on background thread to avoid blocking UI when player is first needed
+        VlcInstanceProvider.preWarm(this)
         PluginRuntimeHooks.onApplicationCreate(this)
         androidTvChannelSyncService.start()
         // Load locale synchronously so it's available before Activity.attachBaseContext.
@@ -68,6 +71,11 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
         val tag = getSharedPreferences("app_locale", Context.MODE_PRIVATE)
             .getString("locale_tag", null)
         LocaleCache.localeTag = tag ?: ""
+    }
+
+    override fun onTerminate() {
+        VlcInstanceProvider.cleanup()
+        super.onTerminate()
     }
 
     override fun newImageLoader(context: android.content.Context): ImageLoader {

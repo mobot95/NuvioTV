@@ -352,8 +352,8 @@ internal fun PlayerRuntimeController.observeSubtitleSettings() {
                 deviceLanguages = resolveDeviceAudioLanguages(),
                 contentOriginalLanguage = contentLanguage
             )
-            if (resolvedAudioLanguages != mpvPreferredAudioLanguages) {
-                mpvPreferredAudioLanguages = resolvedAudioLanguages
+            if (resolvedAudioLanguages != preferredAudioLanguages) {
+                preferredAudioLanguages = resolvedAudioLanguages
                 if (isUsingMpvEngine()) {
                     mpvView?.applyAudioLanguagePreferences(resolvedAudioLanguages)
                     updateMpvAvailableTracks()

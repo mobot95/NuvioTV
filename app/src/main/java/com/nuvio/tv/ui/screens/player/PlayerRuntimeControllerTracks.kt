@@ -1161,7 +1161,7 @@ private fun trackMatchesLanguage(
 }
 
 internal fun PlayerRuntimeController.selectedAudioMatchesResolvedPreferredAudio(track: TrackInfo): Boolean {
-    return mpvPreferredAudioLanguages.any { target -> audioTrackMatchesLanguage(track, target) }
+    return preferredAudioLanguages.any { target -> audioTrackMatchesLanguage(track, target) }
 }
 
 private fun languageCodeAppearsInHaystack(haystack: String, normalizedTarget: String): Boolean {
