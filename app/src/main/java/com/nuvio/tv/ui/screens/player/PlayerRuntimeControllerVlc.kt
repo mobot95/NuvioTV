@@ -1,11 +1,14 @@
 package com.nuvio.tv.ui.screens.player
 
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
-import org.videolan.libvlc.interfaces.IMedia
-import org.videolan.libvlc.MediaPlayer
+import java.util.concurrent.atomic.AtomicBoolean
 
 internal fun PlayerRuntimeController.attachVlcView(view: NuvioVlcSurfaceView?) {
     if (vlcView === view) {
@@ -51,7 +54,7 @@ private fun PlayerRuntimeController.setupVlcEventCallbacks(view: NuvioVlcSurface
         val normalizedPercent = bufferPercent.coerceIn(0f, 100f)
         val percentBucket = normalizedPercent.toInt()
         val isBuffering = normalizedPercent < 100f
-        if (percentBucket != lastBufferingPercentBucket || _uiState.value.isBuffering != isBuffering) {
+        if ((percentBucket != lastBufferingPercentBucket) || (_uiState.value.isBuffering != isBuffering)) {
             lastBufferingPercentBucket = percentBucket
             _uiState.update { state ->
                 state.copy(
@@ -135,12 +138,25 @@ private fun PlayerRuntimeController.setupVlcEventCallbacks(view: NuvioVlcSurface
     }
 }
 
+private var vlcTrackRefreshInProgress = false
+private val vlcSeekInProgress = AtomicBoolean(false)
+private val isVlcReleasing = AtomicBoolean(false)
+
 private fun PlayerRuntimeController.enqueueVlcTrackRefresh(
     block: suspend () -> Unit
 ) {
+    if (vlcTrackRefreshInProgress) {
+        return  // Skip if already refreshing to prevent excessive track parsing
+    }
+    
     vlcTrackRefreshJob?.cancel()
     vlcTrackRefreshJob = scope.launch {
-        block()
+        vlcTrackRefreshInProgress = true
+        try {
+            block()
+        } finally {
+            vlcTrackRefreshInProgress = false
+        }
     }
 }
 
@@ -180,8 +196,13 @@ internal suspend fun PlayerRuntimeController.initializeVlcPlayer(
         // Yield to allow UI updates before heavy operations
         yield()
 
+        // Apply hardware decode mode
+        view.applyHardwareDecodeMode(vlcHardwareDecodeModeSetting)
+
+        val playerSettings = playerSettingsDataStore.playerSettings.first()
+
         // Following the official example: attachViews() BEFORE setMedia()
-        view.attachMediaPlayer()
+        view.attachMediaPlayer(playerSettings)
         view.setMedia(url, headers)
 
         // Apply playback settings
@@ -190,9 +211,22 @@ internal suspend fun PlayerRuntimeController.initializeVlcPlayer(
         view.setSubtitleDelayMs(_uiState.value.subtitleDelayMs)
         view.setAudioDelayMs(_uiState.value.audioDelayMs)
         view.applyAspectMode(_uiState.value.aspectMode)
+        // Note: Subtitle styling not supported in LibVLC 3.x, use MPV for advanced styling
 
         // Apply preferred audio language preferences
         view.applyAudioLanguagePreferences(preferredAudioLanguages)
+
+        // Create MediaSession for lock screen controls and Android Auto
+        try {
+            currentMediaSession?.release()
+            currentMediaSession = null
+            // Note: VLC doesn't integrate directly with MediaSession like ExoPlayer
+            // For full MediaSession support, we would need to create a custom
+            // MediaSession.Callback that bridges VLC events to MediaSession commands
+            // For now, this is a placeholder for future implementation
+        } catch (e: Exception) {
+            Log.w(PlayerRuntimeController.TAG, "[VLC] MediaSession creation skipped: ${e.message}")
+        }
 
         // Start playback
         view.setPaused(startPaused)
@@ -239,115 +273,135 @@ internal suspend fun PlayerRuntimeController.initializeVlcPlayer(
 }
 
 internal fun PlayerRuntimeController.releaseVlcPlayer() {
+    // Idempotency Check: Exit if already releasing to prevent native deadlocks
+    if (!isVlcReleasing.compareAndSet(false, true)) {
+        Log.d(PlayerRuntimeController.TAG, "[VLC] releaseVlcPlayer: already in progress, ignoring.")
+        return
+    }
+
+    Log.d(PlayerRuntimeController.TAG, "[VLC] release sequence START")
     vlcTrackRefreshJob?.cancel()
     vlcTrackRefreshJob = null
 
-    // Clear callbacks first
-    vlcView?.let { view ->
-        view.onPlaybackStateChanged = null
-        view.onBufferingChanged = null
-        view.onTimeChanged = null
-        view.onLengthChanged = null
-        view.onEndReached = null
-        view.onError = null
-        view.onFirstFrameRendered = null
-        view.onTracksChanged = null
+    // Capture the view and clear UI reference immediately on Main thread
+    val view = vlcView
+    vlcView = null
+
+    // Clear callbacks first on UI thread to stop the event stream
+    view?.let { v ->
+        v.onPlaybackStateChanged = null
+        v.onBufferingChanged = null
+        v.onTimeChanged = null
+        v.onLengthChanged = null
+        v.onEndReached = null
+        v.onError = null
+        v.onFirstFrameRendered = null
+        v.onTracksChanged = null
+        
+        v.release() // Clear UI listeners immediately
     }
 
-    runCatching {
-        vlcView?.detachMediaPlayer()
-        vlcView?.release()
+    // Perform native VLC release on background thread to prevent UI deadlocks
+    scope.launch(Dispatchers.IO) {
+        try {
+            view?.performNativeRelease()
+            
+            // Release LibVLC instance when switching away from VLC to prevent memory leak
+            if (currentInternalPlayerEngine != com.nuvio.tv.data.local.InternalPlayerEngine.VLC) {
+                VlcInstanceProvider.cleanup()
+            }
+        } finally {
+            isVlcReleasing.set(false)
+            Log.d(PlayerRuntimeController.TAG, "[VLC] release sequence COMPLETE")
+        }
     }
 }
 
-internal fun PlayerRuntimeController.updateVlcAvailableTracks() {
+internal suspend fun PlayerRuntimeController.updateVlcAvailableTracks() {
     val view = vlcView ?: return
 
     try {
-        // Get audio tracks using typed API
-        val vlcAudioTracks = view.getAudioTracks() ?: emptyArray()
-        Log.d(PlayerRuntimeController.TAG, "[VLC] Raw audio tracks count: ${vlcAudioTracks.size}")
-
-        val selectedAudioTrack = view.getSelectedAudioTrack()
-        val selectedAudioId = selectedAudioTrack?.id
-        Log.d(PlayerRuntimeController.TAG, "[VLC] Selected audio track ID: $selectedAudioId")
-
-        val audioTracks = vlcAudioTracks.mapIndexed { index, track ->
-            val codecSuffix = buildList {
-                track.codec?.takeIf { it.isNotBlank() }?.let { add(it) }
-                // For audio tracks, try to get channel info from AudioTrack subclass
-                if (track is IMedia.AudioTrack) {
-                    track.channels.takeIf { it > 0 }?.let { add("${it}ch") }
+        // Move track parsing to IO dispatcher to prevent UI thread blocking
+        val trackSnapshot = withContext(Dispatchers.IO) {
+            // Get detailed tracks with full metadata (language, codec, channels, etc.)
+            val detailedTracks = view.getDetailedTracks()
+            
+            Log.d(PlayerRuntimeController.TAG, "[VLC] Detailed tracks snapshot - audio=${detailedTracks.audioTracks.size} subtitle=${detailedTracks.subtitleTracks.size}")
+            
+            // Convert VlcTrack to TrackInfo with full metadata
+            val audioTracks = detailedTracks.audioTracks
+                .filter { it.id != -1 } // VLC uses -1 for Disable/None
+                .mapIndexed { index, track ->
+                    Log.d(PlayerRuntimeController.TAG, "[VLC] Audio Track $index: id=${track.id} name=${track.name} selected=${track.isSelected}")
+                    // Build display name with codec and channel info (matching MPV pattern)
+                    val codecSuffix = buildList {
+                        track.codec?.takeIf { it.isNotBlank() }?.let { add(it) }
+                        track.channelCount?.takeIf { it > 0 }?.let { add("${it}ch") }
+                    }.joinToString(" ")
+                    
+                    val baseName = track.name
+                    val displayName = if (codecSuffix.isNotEmpty()) "$baseName ($codecSuffix)" else baseName
+                    
+                    TrackInfo(
+                        index = index,
+                        name = displayName,
+                        language = track.language,
+                        trackId = track.id.toString(),
+                        codec = track.codec,
+                        channelCount = track.channelCount,
+                        sampleRate = track.sampleRate,
+                        isSelected = track.isSelected,
+                        isForced = false
+                    )
                 }
-            }.joinToString(" ")
-
-            val displayName = if (codecSuffix.isBlank()) {
-                track.name ?: track.description ?: "Audio ${index + 1}"
-            } else {
-                "${track.name ?: track.description ?: "Audio ${index + 1}"} ($codecSuffix)"
-            }
-
-            Log.d(PlayerRuntimeController.TAG, "[VLC] Audio track $index: id=${track.id} name=${track.name} lang=${track.language}")
-            TrackInfo(
-                index = index,
-                name = displayName,
-                language = track.language,
-                trackId = track.id,
-                codec = track.codec,
-                channelCount = if (track is IMedia.AudioTrack) track.channels else null,
-                isSelected = track.id == selectedAudioId || track.selected,
-                isForced = false
-            )
+            
+            val subtitleTracks = detailedTracks.subtitleTracks
+                .filter { it.id != -1 }
+                .mapIndexed { index, track ->
+                    TrackInfo(
+                        index = index,
+                        name = track.name,
+                        language = track.language,
+                        trackId = track.id.toString(),
+                        codec = track.codec,
+                        isSelected = track.isSelected,
+                        isForced = track.isForced
+                    )
+                }
+            
+            // Find selected indices
+            val selectedAudioIndex = audioTracks.indexOfFirst { it.isSelected }.takeIf { it >= 0 } ?: -1
+            val selectedSubtitleIndex = subtitleTracks.indexOfFirst { it.isSelected }
+            
+            VlcTrackSnapshotInternal(audioTracks, subtitleTracks, selectedAudioIndex, selectedSubtitleIndex)
         }
-
-        // Get subtitle tracks using typed API
-        val vlcSubtitleTracks = view.getSubtitleTracks() ?: emptyArray()
-        Log.d(PlayerRuntimeController.TAG, "[VLC] Raw subtitle tracks count: ${vlcSubtitleTracks.size}")
-
-        val selectedSubtitleTrack = view.getSelectedSubtitleTrack()
-        val selectedSubtitleId = selectedSubtitleTrack?.id
-
-        val subtitleTracks = vlcSubtitleTracks.mapIndexed { index, track ->
-            val trackTexts = listOfNotNull(track.name, track.language, track.id)
-            val nameHintForced = trackTexts.any { it.contains("forced", ignoreCase = true) }
-            val isSongsAndSigns = trackTexts.any {
-                it.contains("songs", ignoreCase = true) && it.contains("sign", ignoreCase = true)
-            }
-
-            Log.d(PlayerRuntimeController.TAG, "[VLC] Subtitle track $index: id=${track.id} name=${track.name} lang=${track.language}")
-            TrackInfo(
-                index = index,
-                name = track.name ?: track.description ?: "Subtitle ${index + 1}",
-                language = track.language,
-                trackId = track.id,
-                codec = track.codec,
-                isSelected = track.id == selectedSubtitleId || track.selected,
-                isForced = nameHintForced || isSongsAndSigns
-            )
-        }
-
-        // Find selected indices
-        val selectedAudioIndex = audioTracks.indexOfFirst { it.isSelected }.takeIf { it >= 0 } ?: -1
-        val selectedSubtitleIndex = subtitleTracks.indexOfFirst { it.isSelected }
-
-        Log.d(PlayerRuntimeController.TAG, "[VLC] Final tracks - audio=${audioTracks.size} subtitle=${subtitleTracks.size} selectedAudio=$selectedAudioIndex selectedSub=$selectedSubtitleIndex")
+        
+        // Update UI state on main thread
+        Log.d(PlayerRuntimeController.TAG, "[VLC] Final tracks - audio=${trackSnapshot.audioTracks.size} subtitle=${trackSnapshot.subtitleTracks.size} selectedAudio=${trackSnapshot.selectedAudioIndex} selectedSub=${trackSnapshot.selectedSubtitleIndex}")
 
         hasScannedTextTracksOnce = true
 
         _uiState.update { state ->
             state.copy(
-                audioTracks = audioTracks,
-                subtitleTracks = subtitleTracks,
-                selectedAudioTrackIndex = selectedAudioIndex,
-                selectedSubtitleTrackIndex = selectedSubtitleIndex
+                audioTracks = trackSnapshot.audioTracks,
+                subtitleTracks = trackSnapshot.subtitleTracks,
+                selectedAudioTrackIndex = trackSnapshot.selectedAudioIndex,
+                selectedSubtitleTrackIndex = trackSnapshot.selectedSubtitleIndex
             )
         }
 
-        updateAudioControlAvailability(audioTracks, selectedAudioIndex)
+        updateAudioControlAvailability(trackSnapshot.audioTracks, trackSnapshot.selectedAudioIndex)
     } catch (e: Exception) {
         Log.e(PlayerRuntimeController.TAG, "[VLC] Track extraction failed", e)
     }
 }
+
+private data class VlcTrackSnapshotInternal(
+    val audioTracks: List<TrackInfo>,
+    val subtitleTracks: List<TrackInfo>,
+    val selectedAudioIndex: Int,
+    val selectedSubtitleIndex: Int
+)
 
 // VLC track selection functions
 internal fun PlayerRuntimeController.selectVlcAudioTrack(index: Int) {
@@ -356,14 +410,14 @@ internal fun PlayerRuntimeController.selectVlcAudioTrack(index: Int) {
     if (index < 0 || index >= tracks.size) return
 
     val track = tracks[index]
-    val trackId = track.trackId
+    val trackId = track.trackId?.toIntOrNull()
     if (trackId == null) {
-        Log.w(PlayerRuntimeController.TAG, "[VLC] selectVlcAudioTrack - trackId is null for index=$index, skipping selection")
+        Log.w(PlayerRuntimeController.TAG, "[VLC] selectVlcAudioTrack - trackId is invalid for index=$index, skipping selection")
         return
     }
 
     Log.d(PlayerRuntimeController.TAG, "[VLC] selectVlcAudioTrack - index=$index trackId=$trackId")
-    if (view.selectTrackById(trackId)) {
+    if (view.selectAudioTrack(trackId)) {
         _uiState.update { it.copy(selectedAudioTrackIndex = index) }
     } else {
         Log.w(PlayerRuntimeController.TAG, "[VLC] selectVlcAudioTrack - failed to select trackId=$trackId")
@@ -385,14 +439,14 @@ internal fun PlayerRuntimeController.selectVlcSubtitleTrack(index: Int) {
     if (index >= tracks.size) return
 
     val track = tracks[index]
-    val trackId = track.trackId
+    val trackId = track.trackId?.toIntOrNull()
     if (trackId == null) {
-        Log.w(PlayerRuntimeController.TAG, "[VLC] selectVlcSubtitleTrack - trackId is null for index=$index, skipping selection")
+        Log.w(PlayerRuntimeController.TAG, "[VLC] selectVlcSubtitleTrack - trackId is invalid for index=$index, skipping selection")
         return
     }
 
     Log.d(PlayerRuntimeController.TAG, "[VLC] selectVlcSubtitleTrack - index=$index trackId=$trackId")
-    if (view.selectTrackById(trackId)) {
+    if (view.selectSubtitleTrack(trackId)) {
         _uiState.update { it.copy(selectedSubtitleTrackIndex = index) }
     } else {
         Log.w(PlayerRuntimeController.TAG, "[VLC] selectVlcSubtitleTrack - failed to select trackId=$trackId")
@@ -454,14 +508,21 @@ internal fun PlayerRuntimeController.applyPendingVlcSeekIfNeeded(
     val canSeekNow = durationMs > 0L || currentPositionMs > 0L || hasRenderedFirstFrame
     if (!canSeekNow) return
 
+    // Prevent concurrent seeks using atomic flag
+    if (!vlcSeekInProgress.compareAndSet(false, true)) {
+        return  // Seek already in progress
+    }
+
     Log.d(PlayerRuntimeController.TAG, "[VLC] applyPendingVlcSeekIfNeeded: initiating seek to $target")
 
-    // CRITICAL FIX: Clear pending states BEFORE initiating the seek
-    // to prevent re-triggering this function from subsequent events while buffering.
-    // Use synchronized block to ensure atomicity with state update.
-    synchronized(this) {
+    // Initiate seek
+    view.seekTo(target)
+    
+    // Clear pending state AFTER seek completes to prevent race conditions
+    scope.launch {
+        delay(500)  // Wait for seek buffering to complete
+        vlcSeekInProgress.set(false)
         _uiState.update { it.copy(pendingSeekPosition = null) }
         pendingResumeProgress = null
-        view.seekTo(target)
     }
 }

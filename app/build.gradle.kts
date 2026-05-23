@@ -350,7 +350,7 @@ dependencies {
     // Local nextlib-mediainfo fork (static FFmpeg; no libav*.so in final AAR)
     implementation(files("libs/nextlib-mediainfo-local.aar"))
     // vlc-lib
-    implementation("org.videolan.android:libvlc-all:4.0.0-eap24")
+    implementation("org.videolan.android:libvlc-all:3.7.0")
 
     implementation("io.github.abdallahmehiz:mpv-android-lib:0.1.12")
     implementation("dev.chrisbanes.haze:haze-android:0.7.3") {

@@ -1,17 +1,25 @@
 package com.nuvio.tv.ui.screens.player
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.net.Uri
+import android.os.Build
 import android.util.AttributeSet
-import android.view.View
+import android.util.Log
+import com.nuvio.tv.data.local.VlcHardwareDecodeMode
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
-import org.videolan.libvlc.interfaces.IMedia
 import org.videolan.libvlc.interfaces.IVLCVout
 import org.videolan.libvlc.util.VLCVideoLayout
 import kotlin.math.pow
 
+/**
+ * Custom VLC Video Layout for LibVLC 3.7.0 Stable.
+ * Handles surface management, lifecycle, audio focus, and provides a clean API for the PlayerRuntimeController.
+ */
 class NuvioVlcSurfaceView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
@@ -22,6 +30,24 @@ class NuvioVlcSurfaceView @JvmOverloads constructor(
     private var surfacesCreated = false
     private var pendingPlay = false
     private var currentAspectMode: AspectMode = AspectMode.ORIGINAL
+    private var hardwareDecodeMode: VlcHardwareDecodeMode = VlcHardwareDecodeMode.AUTO
+    
+    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private var audioFocusRequest: AudioFocusRequest? = null
+
+    private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                Log.d(TAG, "Audio focus lost, pausing player")
+                setPaused(paused = true)
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                Log.d(TAG, "Audio focus gained")
+            }
+        }
+    }
+    
     @Volatile
     private var mediaPlayerInitialized = false
     @Volatile
@@ -42,19 +68,35 @@ class NuvioVlcSurfaceView @JvmOverloads constructor(
         initializeMediaPlayerIfNeeded()
     }
 
-    private fun initializeMediaPlayerIfNeeded(): Boolean {
-        if (mediaPlayerInitialized && mediaPlayer != null) return true
+    /**
+     * Ensures the MediaPlayer instance is created and listeners are attached.
+     */
+    private fun initializeMediaPlayerIfNeeded(settings: com.nuvio.tv.data.local.PlayerSettings? = null): Boolean {
+        if (mediaPlayerInitialized && (mediaPlayer != null)) return true
 
         return try {
-            val vlcInstance = libVlc ?: VlcInstanceProvider.get(context).also { libVlc = it }
+            val vlcInstance = libVlc ?: VlcInstanceProvider.get(context, settings).also { libVlc = it }
 
             mediaPlayer?.let { stalePlayer ->
-                runCatching { stalePlayer.setEventListener(null) }
-                runCatching { stalePlayer.vlcVout.removeCallback(this) }
-                runCatching { stalePlayer.release() }
+                // CRITICAL FIX: Offload native release to background thread to prevent UI deadlock
+                val playerToRelease = stalePlayer
+                runCatching { playerToRelease.setEventListener(null) }
+                runCatching { playerToRelease.vlcVout.removeCallback(this@NuvioVlcSurfaceView) }
+                
+                Thread {
+                    Log.d(TAG, "[VLC] Releasing stale player in background")
+                    runCatching {
+                        if (playerToRelease.isPlaying) playerToRelease.stop()
+                        playerToRelease.detachViews()
+                        playerToRelease.release()
+                    }
+                    Log.d(TAG, "[VLC] Stale player released")
+                }.start()
             }
 
             mediaPlayer = MediaPlayer(vlcInstance).apply {
+                // Remove setAudioOutput override to allow global OpenSLES preference to take effect
+                volume = 100
                 setEventListener(this@NuvioVlcSurfaceView)
                 vlcVout.addCallback(this@NuvioVlcSurfaceView)
             }
@@ -62,486 +104,417 @@ class NuvioVlcSurfaceView @JvmOverloads constructor(
             isReleasing = false
             true
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "[VLC] Failed to initialize MediaPlayer", e)
+            Log.e(TAG, "[VLC] Failed to initialize MediaPlayer", e)
             mediaPlayer = null
             mediaPlayerInitialized = false
             false
         }
     }
     
-    // MediaPlayer.EventListener implementation
+    /**
+     * MediaPlayer.EventListener implementation for LibVLC 3.x.
+     */
     override fun onEvent(event: MediaPlayer.Event) {
-        // Ignore events if release is in progress to prevent NPEs from callbacks already in flight
         if (isReleasing) return
 
         when (event.type) {
             MediaPlayer.Event.Playing -> {
-                android.util.Log.d("NuvioVlcSurfaceView", "[VLC Event] Playing")
+                Log.d(TAG, "[VLC Event] Playing. Audio Track: ${mediaPlayer?.audioTrack}, Volume: ${mediaPlayer?.volume}")
                 onPlaybackStateChanged?.invoke(true)
             }
             MediaPlayer.Event.Paused -> {
-                android.util.Log.d("NuvioVlcSurfaceView", "[VLC Event] Paused")
+                Log.d(TAG, "[VLC Event] Paused")
                 onPlaybackStateChanged?.invoke(false)
             }
             MediaPlayer.Event.Stopped -> {
-                android.util.Log.d("NuvioVlcSurfaceView", "[VLC Event] Stopped")
+                Log.d(TAG, "[VLC Event] Stopped")
                 onPlaybackStateChanged?.invoke(false)
             }
             MediaPlayer.Event.EndReached -> {
-                android.util.Log.d("NuvioVlcSurfaceView", "[VLC Event] EndReached")
+                Log.d(TAG, "[VLC Event] EndReached")
                 onEndReached?.invoke()
             }
             MediaPlayer.Event.EncounteredError -> {
-                android.util.Log.e("NuvioVlcSurfaceView", "[VLC Event] EncounteredError")
-                onError?.invoke("VLC playback error")
+                Log.e(TAG, "[VLC Event] EncounteredError")
+                val mp = mediaPlayer
+                val errorMsg = when {
+                    mp == null -> "Media player not initialized"
+                    !mp.isSeekable -> "Stream is not seekable"
+                    mp.length == 0L -> "Invalid media format or empty stream"
+                    else -> "VLC playback error (event: ${event.type})"
+                }
+                onError?.invoke(errorMsg)
             }
             MediaPlayer.Event.Buffering -> {
                 val bufferPercent = event.buffering
-                android.util.Log.d("NuvioVlcSurfaceView", "[VLC Event] Buffering: $bufferPercent%")
                 onBufferingChanged?.invoke(bufferPercent)
             }
             MediaPlayer.Event.TimeChanged -> {
-                val timeMs = event.timeChanged
-                onTimeChanged?.invoke(timeMs)
+                onTimeChanged?.invoke(event.timeChanged)
             }
             MediaPlayer.Event.LengthChanged -> {
-                val lengthMs = event.lengthChanged
-                android.util.Log.d("NuvioVlcSurfaceView", "[VLC Event] LengthChanged: $lengthMs ms")
-                onLengthChanged?.invoke(lengthMs)
+                Log.d(TAG, "[VLC Event] LengthChanged: ${event.lengthChanged} ms")
+                onLengthChanged?.invoke(event.lengthChanged)
             }
             MediaPlayer.Event.Vout -> {
-                val voutCount = event.voutCount
-                android.util.Log.d("NuvioVlcSurfaceView", "[VLC Event] Vout count: $voutCount")
-                if (voutCount > 0) {
+                if (event.voutCount > 0) {
+                    Log.d(TAG, "[VLC Event] First frame rendered")
                     onFirstFrameRendered?.invoke()
                 }
             }
-            MediaPlayer.Event.ESAdded, MediaPlayer.Event.ESDeleted, MediaPlayer.Event.ESSelected -> {
-                android.util.Log.d("NuvioVlcSurfaceView", "[VLC Event] Track changed: ${event.type}")
+            // Track changes in 3.x are signaled by these events
+            MediaPlayer.Event.ESAdded, 
+            MediaPlayer.Event.ESDeleted, 
+            MediaPlayer.Event.ESSelected -> {
+                Log.d(TAG, "[VLC Event] Tracks changed")
                 onTracksChanged?.invoke()
             }
         }
     }
 
-    fun attachMediaPlayer() {
-        if (!initializeMediaPlayerIfNeeded()) {
-            android.util.Log.w(TAG, "[VLC] attachMediaPlayer called but MediaPlayer initialization failed")
-            return
-        }
-        // Reset isReleasing flag to handle view reuse scenarios
+    /**
+     * Attaches the MediaPlayer to this VideoLayout.
+     */
+    fun attachMediaPlayer(settings: com.nuvio.tv.data.local.PlayerSettings? = null) {
+        if (!initializeMediaPlayerIfNeeded(settings)) return
         isReleasing = false
-        surfacesCreated = false
+        // In 3.x, attachViews(VLCVideoLayout, videoHelper, useTextureView, useVideoLayout)
         mediaPlayer?.attachViews(this, null, true, false)
     }
 
+    /**
+     * Detaches the MediaPlayer and stops playback.
+     */
     fun detachMediaPlayer() {
-        if (!mediaPlayerInitialized) {
-            android.util.Log.w(TAG, "[VLC] detachMediaPlayer called but MediaPlayer not initialized")
-            return
-        }
-        mediaPlayer?.stop() // Following official example: stop before detachViews
+        if (!mediaPlayerInitialized) return
+        mediaPlayer?.stop()
         mediaPlayer?.detachViews()
         surfacesCreated = false
     }
 
+    /**
+     * Configures the media to play, including HTTP headers and HW acceleration.
+     */
     fun setMedia(url: String, headers: Map<String, String> = emptyMap()) {
-        if (!initializeMediaPlayerIfNeeded()) {
-            android.util.Log.w(TAG, "[VLC] setMedia called but MediaPlayer initialization failed")
-            return
-        }
+        if (!initializeMediaPlayerIfNeeded()) return
 
-        val uri = android.net.Uri.parse(url)
-        val media = Media(libVlc, uri).apply {
-            // Add headers
-            headers.forEach { (key, value) ->
-                addOption(":http-header=$key=$value")
+        val media = Media(libVlc, Uri.parse(url)).apply {
+            // FIX: Inject User-Agent for CDN compatibility
+            if (!headers.any { it.key.equals("User-Agent", ignoreCase = true) }) {
+                addOption(":http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             }
-            // Enable hardware decoding
-            addOption(":codec=mediacodec,all")
-            // Set network caching
+            
+            // FIX: Correct HTTP header format "Key: Value"
+            headers.forEach { (key, value) ->
+                addOption(":http-header=$key: $value")
+            }
+            
+            // Audio stabilization options
+            addOption(":stereo-mode=1")
+            
+            // Respect hardware decode mode setting
+            when (hardwareDecodeMode) {
+                VlcHardwareDecodeMode.AUTO -> setHWDecoderEnabled(true, true)
+                VlcHardwareDecodeMode.HARDWARE -> setHWDecoderEnabled(true, false)
+                VlcHardwareDecodeMode.SOFTWARE -> setHWDecoderEnabled(false, false)
+            }
+            
             addOption(":network-caching=1500")
+            addOption(":clock-jitter=0")
+            addOption(":clock-synchro=0")
         }
+        
+        Log.d(TAG, "[VLC] Setting media URL: $url")
         mediaPlayer?.media = media
-        media.release() // Following official example: release media after setMedia
+        media.release()
     }
 
+    fun applyHardwareDecodeMode(mode: VlcHardwareDecodeMode) {
+        hardwareDecodeMode = mode
+    }
+
+    /**
+     * Handles Play/Pause requests with race condition protection and audio focus.
+     */
     fun setPaused(paused: Boolean) {
         if (paused) {
             pendingPlay = false
             mediaPlayer?.pause()
+            abandonAudioFocus()
         } else {
-            // Always try to play - VLC handles the surface internally
-            pendingPlay = false
-            mediaPlayer?.play()
+            if (requestAudioFocus()) {
+                if (surfacesCreated) {
+                    pendingPlay = false
+                    mediaPlayer?.play()
+                } else {
+                    // FIX: If surface is not ready, defer play until onSurfacesCreated
+                    pendingPlay = true
+                    Log.d(TAG, "[VLC] Play deferred: surface not ready")
+                }
+            }
         }
     }
 
-    fun isPlayingNow(): Boolean {
-        val isPlaying = mediaPlayer?.isPlaying == true
-        return isPlaying
+    private fun requestAudioFocus(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val attributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                .build()
+            
+            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(attributes)
+                .setAcceptsDelayedFocusGain(true)
+                .setOnAudioFocusChangeListener(audioFocusChangeListener)
+                .build()
+            
+            audioFocusRequest = request
+            audioManager.requestAudioFocus(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(
+                audioFocusChangeListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN
+            ) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        }
     }
+
+    fun abandonAudioFocus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.abandonAudioFocus(audioFocusChangeListener)
+        }
+    }
+
+    fun isPlayingNow(): Boolean = mediaPlayer?.isPlaying == true
 
     fun seekTo(positionMs: Long) {
         val mp = mediaPlayer ?: return
         val duration = mp.length
-        android.util.Log.d(TAG, "[VLC] seekTo - positionMs=$positionMs currentPos=${mp.time} duration=$duration isSeekable=${mp.isSeekable}")
         
-        if (!mp.isSeekable) {
-            android.util.Log.w(TAG, "[VLC] seekTo - media is not seekable!")
-            return
-        }
+        if (!mp.isSeekable) return
         
         try {
-            // Try using setPosition (0.0-1.0 range) which is more reliable
             if (duration > 0) {
                 val position = positionMs.toFloat() / duration.toFloat()
-                val clampedPosition = position.coerceIn(0f, 1f)
-                mp.setPosition(clampedPosition)
-                android.util.Log.d(TAG, "[VLC] seekTo - used setPosition($clampedPosition), newPos=${mp.time}")
+                mp.position = position.coerceIn(0f, 1f)
             } else {
-                // Fallback to setTime if duration is unknown
                 mp.time = positionMs
-                android.util.Log.d(TAG, "[VLC] seekTo - used time property, newPos=${mp.time}")
             }
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "[VLC] seekTo failed", e)
+            Log.e(TAG, "[VLC] seekTo failed", e)
         }
     }
 
-    fun getCurrentPosition(): Long {
-        return mediaPlayer?.time ?: 0L
-    }
+    fun getCurrentPosition(): Long = mediaPlayer?.time ?: 0L
 
-    fun getDuration(): Long {
-        return mediaPlayer?.length ?: 0L
-    }
+    fun getDuration(): Long = mediaPlayer?.length ?: 0L
 
     fun setPlaybackSpeed(speed: Float) {
         mediaPlayer?.rate = speed
     }
     
-    // Set subtitle delay in milliseconds (positive = delayed, negative = earlier)
     fun setSubtitleDelayMs(delayMs: Int) {
-        android.util.Log.d("NuvioVlcSurfaceView", "[VLC] setSubtitleDelayMs - delayMs=$delayMs")
         try {
-            // VLC uses microseconds for SPU delay
-            val delayUs = delayMs.toLong() * 1000L
-            mediaPlayer?.setSpuDelay(delayUs)
+            // VLC uses microseconds
+            mediaPlayer?.spuDelay = delayMs.toLong() * 1000L
         } catch (e: Exception) {
-            android.util.Log.e("NuvioVlcSurfaceView", "[VLC] setSubtitleDelayMs failed", e)
+            Log.e(TAG, "setSubtitleDelayMs failed", e)
         }
     }
     
-    // Get current subtitle delay in milliseconds
-    fun getSubtitleDelayMs(): Int {
-        return try {
-            ((mediaPlayer?.spuDelay ?: 0L) / 1000L).toInt()
-        } catch (e: Exception) {
-            0
-        }
+    fun applySubtitleStyle() {
+        // LibVLC 3.x has limited subtitle styling support
+        // Most styling is handled by LibVLC's native renderer
+        // For advanced styling, use MPV engine instead
+        Log.d(TAG, "[VLC] Subtitle styling limited in LibVLC 3.x - consider using MPV for advanced styling")
     }
     
-    // Set audio delay in milliseconds (positive = delayed, negative = earlier)
     fun setAudioDelayMs(delayMs: Int) {
-        android.util.Log.d("NuvioVlcSurfaceView", "[VLC] setAudioDelayMs - delayMs=$delayMs")
         try {
-            // VLC uses microseconds for audio delay
-            val delayUs = delayMs.toLong() * 1000L
-            mediaPlayer?.setAudioDelay(delayUs)
+            mediaPlayer?.audioDelay = delayMs.toLong() * 1000L
         } catch (e: Exception) {
-            android.util.Log.e("NuvioVlcSurfaceView", "[VLC] setAudioDelayMs failed", e)
+            Log.e(TAG, "setAudioDelayMs failed", e)
         }
     }
     
-    // Get current audio delay in milliseconds
-    fun getAudioDelayMs(): Int {
-        return try {
-            ((mediaPlayer?.audioDelay ?: 0L) / 1000L).toInt()
-        } catch (e: Exception) {
-            0
-        }
-    }
-    
-    // Set volume (0-100 is normal range, >100 for amplification)
-    fun setVolume(volume: Int) {
-        android.util.Log.d("NuvioVlcSurfaceView", "[VLC] setVolume - volume=$volume")
-        try {
-            mediaPlayer?.volume = volume.coerceIn(0, 200)
-        } catch (e: Exception) {
-            android.util.Log.e("NuvioVlcSurfaceView", "[VLC] setVolume failed", e)
-        }
-    }
-    
-    // Get current volume
-    fun getVolume(): Int {
-        return try {
-            mediaPlayer?.volume ?: 100
-        } catch (e: Exception) {
-            100
-        }
-    }
-    
-    // Apply audio amplification in dB (similar to MPV implementation)
     fun applyAudioAmplificationDb(db: Int) {
         val clampedDb = db.coerceIn(0, 10)
-        // Convert dB to linear scale and then to VLC volume (100 = normal)
         val linearScale = 10.0.pow(clampedDb / 20.0)
         val targetVolume = (100.0 * linearScale).toInt().coerceIn(0, 200)
-        setVolume(targetVolume)
+        mediaPlayer?.volume = targetVolume
     }
     
-    // Apply aspect mode
     fun applyAspectMode(mode: AspectMode) {
         currentAspectMode = mode
-        android.util.Log.d(TAG, "[VLC] applyAspectMode - mode=$mode")
         try {
             when (mode) {
                 AspectMode.ORIGINAL -> {
-                    mediaPlayer?.setVideoScale(MediaPlayer.ScaleType.SURFACE_BEST_FIT)
+                    mediaPlayer?.videoScale = MediaPlayer.ScaleType.SURFACE_BEST_FIT
                 }
                 AspectMode.FULL_SCREEN -> {
-                    // Crop to fill screen (may cut edges)
-                    mediaPlayer?.setVideoScale(MediaPlayer.ScaleType.SURFACE_FILL)
+                    mediaPlayer?.videoScale = MediaPlayer.ScaleType.SURFACE_FILL
                 }
                 AspectMode.STRETCH -> {
-                    // Stretch to fill (ignores aspect ratio)
-                    // SURFACE_STRETCH not available in this VLC version, use SURFACE_FILL as fallback
-                    mediaPlayer?.setVideoScale(MediaPlayer.ScaleType.SURFACE_FILL)
+                    // Use FIT_SCREEN for stretch to fill entire screen
+                    mediaPlayer?.videoScale = MediaPlayer.ScaleType.SURFACE_FIT_SCREEN
                 }
                 AspectMode.SLIGHT_ZOOM -> {
-                    // Slight zoom - use 16:10 aspect
-                    mediaPlayer?.setVideoScale(MediaPlayer.ScaleType.SURFACE_16_10)
+                    // Use 16:10 for slight zoom (most common aspect ratio)
+                    mediaPlayer?.videoScale = MediaPlayer.ScaleType.SURFACE_16_10
                 }
                 AspectMode.CINEMA_ZOOM -> {
-                    // Cinema zoom - use 16:9 crop
-                    mediaPlayer?.setVideoScale(MediaPlayer.ScaleType.SURFACE_16_9)
+                    // Use 4:3 for cinema zoom (wider crop)
+                    mediaPlayer?.videoScale = MediaPlayer.ScaleType.SURFACE_4_3
                 }
                 AspectMode.VERTICAL_STRETCH -> {
-                    // Fit height - use fit screen
-                    mediaPlayer?.setVideoScale(MediaPlayer.ScaleType.SURFACE_FIT_SCREEN)
+                    // Use 16:10 for vertical stretch
+                    mediaPlayer?.videoScale = MediaPlayer.ScaleType.SURFACE_16_10
                 }
                 AspectMode.HORIZONTAL_STRETCH -> {
-                    // Fit width - stretch to fill width
-                    // SURFACE_FIT_WIDTH not available in this VLC version, use SURFACE_FILL as fallback
-                    mediaPlayer?.setVideoScale(MediaPlayer.ScaleType.SURFACE_FILL)
+                    // Use FILL for horizontal stretch
+                    mediaPlayer?.videoScale = MediaPlayer.ScaleType.SURFACE_FILL
                 }
             }
+            Log.d(TAG, "[VLC] Applied aspect mode: $mode -> ${mediaPlayer?.videoScale}")
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "[VLC] applyAspectMode failed", e)
+            Log.e(TAG, "applyAspectMode failed", e)
         }
     }
     
-    // Apply audio language preferences - tries to select audio track matching preferred languages
     fun applyAudioLanguagePreferences(languages: List<String>) {
-        if (languages.isEmpty()) {
-            android.util.Log.d(TAG, "[VLC] applyAudioLanguagePreferences - empty list, skipping")
-            return
-        }
-        android.util.Log.d(TAG, "[VLC] applyAudioLanguagePreferences - languages=$languages")
         try {
-            val audioTracks = getAudioTracks() ?: return
-            if (audioTracks.isEmpty()) {
-                android.util.Log.d(TAG, "[VLC] applyAudioLanguagePreferences - no audio tracks available")
-                return
+            val audioTracks = mediaPlayer?.audioTracks ?: return
+            
+            // Try to select preferred language track
+            if (languages.isNotEmpty()) {
+                for (preferredLang in languages) {
+                    val normalizedPreferred = preferredLang.trim().lowercase()
+                    val matchingTrack = audioTracks.firstOrNull { track ->
+                        val trackName = track.name?.lowercase() ?: ""
+                        trackName.contains(normalizedPreferred)
+                    }
+                    if (matchingTrack != null) {
+                        mediaPlayer?.audioTrack = matchingTrack.id
+                        Log.d(TAG, "[VLC] Selected audio track by language: ${matchingTrack.name} (id=${matchingTrack.id})")
+                        return
+                    }
+                }
             }
             
-            // Try to find a track matching one of the preferred languages
-            for (preferredLang in languages) {
-                val normalizedPreferred = preferredLang.trim().lowercase()
-                val matchingTrack = audioTracks.firstOrNull { track ->
-                    val trackLang = track.language?.trim()?.lowercase() ?: return@firstOrNull false
-                    trackLang == normalizedPreferred ||
-                        trackLang.startsWith("$normalizedPreferred-") ||
-                        trackLang.startsWith("${normalizedPreferred}_")
-                }
-                if (matchingTrack != null) {
-                    val trackId = matchingTrack.id
-                    if (trackId == null) {
-                        android.util.Log.w(TAG, "[VLC] applyAudioLanguagePreferences - matching track has null ID, skipping")
-                        continue
-                    }
-                    android.util.Log.d(TAG, "[VLC] applyAudioLanguagePreferences - selecting track: ${matchingTrack.language}/${matchingTrack.name}")
-                    selectTrackById(trackId)
-                    return
-                }
+            // FALLBACK: Select first available audio track if no match found
+            val firstTrack = audioTracks.firstOrNull { it.id != -1 }
+            if (firstTrack != null) {
+                mediaPlayer?.audioTrack = firstTrack.id
+                Log.d(TAG, "[VLC] Selected first audio track as fallback: ${firstTrack.name} (id=${firstTrack.id})")
+            } else {
+                Log.w(TAG, "[VLC] No valid audio tracks available")
             }
-            android.util.Log.d(TAG, "[VLC] applyAudioLanguagePreferences - no matching track found for $languages")
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "[VLC] applyAudioLanguagePreferences failed", e)
+            Log.e(TAG, "applyAudioLanguagePreferences failed", e)
         }
     }
     
-    // Add external subtitle file
-    fun addExternalSubtitle(uri: Uri, select: Boolean = true): Boolean {
-        android.util.Log.d("NuvioVlcSurfaceView", "[VLC] addExternalSubtitle - uri=$uri select=$select")
+    fun addExternalSubtitleUrl(url: String, select: Boolean = true): Boolean {
         return try {
             // Type 1 = subtitle slave
-            mediaPlayer?.addSlave(IMedia.Slave.Type.Subtitle, uri, select) ?: false
+            mediaPlayer?.addSlave(org.videolan.libvlc.interfaces.IMedia.Slave.Type.Subtitle, Uri.parse(url), select) ?: false
         } catch (e: Exception) {
-            android.util.Log.e("NuvioVlcSurfaceView", "[VLC] addExternalSubtitle failed", e)
+            Log.e(TAG, "addExternalSubtitleUrl failed", e)
             false
         }
     }
-    
-    // Add external subtitle from URL
-    fun addExternalSubtitleUrl(url: String, select: Boolean = true): Boolean {
-        return addExternalSubtitle(Uri.parse(url), select)
-    }
-    
-    // Get video tracks
-    fun getVideoTracks(): Array<IMedia.Track>? {
-        return try {
-            val tracks = mediaPlayer?.getTracks(TRACK_TYPE_VIDEO)
-            android.util.Log.d(TAG, "[VLC] getVideoTracks - count=${tracks?.size ?: 0}")
-            tracks
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "[VLC] getVideoTracks failed", e)
-            null
-        }
-    }
 
-    companion object {
-        // Track type constants for libVLC 4.0 - use IMedia.Track.Type values
-        // IMedia.Track.Type: Unknown=-1, Audio=0, Video=1, Text=2
-        val TRACK_TYPE_AUDIO: Int get() = IMedia.Track.Type.Audio
-        val TRACK_TYPE_VIDEO: Int get() = IMedia.Track.Type.Video
-        val TRACK_TYPE_TEXT: Int get() = IMedia.Track.Type.Text  // Subtitles
+    // --- Track Management (3.x APIs) ---
+
+    fun getAudioTracks(): Array<MediaPlayer.TrackDescription>? = mediaPlayer?.audioTracks
+
+    fun getSubtitleTracks(): Array<MediaPlayer.TrackDescription>? = mediaPlayer?.spuTracks
+
+    fun getSelectedAudioTrackId(): Int = mediaPlayer?.audioTrack ?: -1
+
+    fun getSelectedSubtitleTrackId(): Int = mediaPlayer?.spuTrack ?: -1
+    
+    /**
+     * Get detailed track information using TrackDescription API.
+     * LibVLC 3.x has limited metadata - only id and name are available.
+     * For full metadata (codec, channels, sample rate), use MPV engine.
+     */
+    fun getDetailedTracks(): VlcTrackSnapshot {
+        val vlcAudioTracks = mediaPlayer?.audioTracks ?: emptyArray()
+        val vlcSubtitleTracks = mediaPlayer?.spuTracks ?: emptyArray()
+        val selectedAudioId = mediaPlayer?.audioTrack ?: -1
+        val selectedSubId = mediaPlayer?.spuTrack ?: -1
         
-        private const val TAG = "NuvioVlcSurfaceView"
-    }
-
-    // Get audio tracks using libVLC 4.0 API - returns typed array
-    fun getAudioTracks(): Array<IMedia.Track>? {
-        return try {
-            val tracks = mediaPlayer?.getTracks(TRACK_TYPE_AUDIO)
-            android.util.Log.d(TAG, "[VLC] getAudioTracks - count=${tracks?.size ?: 0}")
-            tracks
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "[VLC] getAudioTracks failed", e)
-            null
-        }
-    }
-
-    // Get subtitle tracks using libVLC 4.0 API - returns typed array
-    fun getSubtitleTracks(): Array<IMedia.Track>? {
-        return try {
-            val tracks = mediaPlayer?.getTracks(TRACK_TYPE_TEXT)
-            android.util.Log.d(TAG, "[VLC] getSubtitleTracks - count=${tracks?.size ?: 0}")
-            tracks
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "[VLC] getSubtitleTracks failed", e)
-            null
-        }
-    }
-
-    // Get selected audio track - returns typed track
-    fun getSelectedAudioTrack(): IMedia.Track? {
-        return try {
-            mediaPlayer?.getSelectedTrack(TRACK_TYPE_AUDIO)
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "[VLC] getSelectedAudioTrack failed", e)
-            null
-        }
-    }
-
-    // Get selected subtitle track - returns typed track
-    fun getSelectedSubtitleTrack(): IMedia.Track? {
-        return try {
-            mediaPlayer?.getSelectedTrack(TRACK_TYPE_TEXT)
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "[VLC] getSelectedSubtitleTrack failed", e)
-            null
-        }
-    }
-
-    // Select track by ID
-    fun selectTrackById(trackId: String): Boolean {
-        android.util.Log.d(TAG, "[VLC] selectTrackById - trackId=$trackId")
-        return try {
-            mediaPlayer?.selectTrack(trackId) ?: false
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "[VLC] selectTrackById failed", e)
-            false
-        }
-    }
-
-    // Select audio track by index
-    fun selectAudioTrack(index: Int): Boolean {
-        val tracks = getAudioTracks() ?: return false
-        if (index < 0 || index >= tracks.size) return false
-        val track = tracks[index]
-        val trackId = track.id ?: run {
-            android.util.Log.w(TAG, "[VLC] selectAudioTrack - track.id is null for index=$index")
-            return false
-        }
-        return selectTrackById(trackId)
-    }
-
-    // Select subtitle track by index
-    fun selectSubtitleTrack(index: Int): Boolean {
-        val tracks = getSubtitleTracks() ?: return false
-        if (index < 0 || index >= tracks.size) return false
-        val track = tracks[index]
-        val trackId = track.id ?: run {
-            android.util.Log.w(TAG, "[VLC] selectSubtitleTrack - track.id is null for index=$index")
-            return false
-        }
-        return selectTrackById(trackId)
-    }
-
-    // Disable subtitles
-    fun disableSubtitles() {
-        android.util.Log.d(TAG, "[VLC] disableSubtitles")
+        Log.d(TAG, "[VLC] getDetailedTracks: audio=${vlcAudioTracks.size}, selectedAudio=$selectedAudioId")
+        
         try {
-            mediaPlayer?.unselectTrackType(TRACK_TYPE_TEXT)
+            val audioTracks = vlcAudioTracks
+                .filter { it.id != -1 }
+                .mapIndexed { index, track ->
+                    VlcTrack(
+                        id = track.id,
+                        name = track.name ?: "Audio ${index + 1}",
+                        language = null,
+                        codec = null,
+                        channelCount = null,
+                        sampleRate = null,
+                        isSelected = track.id == selectedAudioId,
+                        isForced = false
+                    )
+                }
+            
+            val subtitleTracks = vlcSubtitleTracks
+                .filter { it.id != -1 }
+                .mapIndexed { index, track ->
+                    val trackName = track.name ?: ""
+                    val isForced = trackName.contains("forced", ignoreCase = true) ||
+                            (trackName.contains("songs", ignoreCase = true) && trackName.contains("sign", ignoreCase = true))
+                    
+                    VlcTrack(
+                        id = track.id,
+                        name = trackName.takeIf { it.isNotBlank() } ?: "Subtitle ${index + 1}",
+                        language = null,
+                        codec = null,
+                        isSelected = track.id == selectedSubId,
+                        isForced = isForced
+                    )
+                }
+            
+            return VlcTrackSnapshot(audioTracks, subtitleTracks)
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "[VLC] disableSubtitles failed", e)
-        }
-    }
-    
-    // Check if media is seekable
-    fun isSeekable(): Boolean {
-        return try {
-            mediaPlayer?.isSeekable ?: false
-        } catch (e: Exception) {
-            false
-        }
-    }
-    
-    // Get player state
-    fun getPlayerState(): Int {
-        return try {
-            mediaPlayer?.playerState ?: -1
-        } catch (e: Exception) {
-            -1
+            Log.e(TAG, "[VLC] getDetailedTracks failed", e)
+            return VlcTrackSnapshot(emptyList(), emptyList())
         }
     }
 
-    // Debug: log available methods on MediaPlayer for track APIs
-    fun logAvailableMethods() {
-        mediaPlayer?.let { mp ->
-            val methods = mp.javaClass.methods
-            val trackMethods = methods.filter { 
-                it.name.contains("track", ignoreCase = true) || 
-                it.name.contains("audio", ignoreCase = true) ||
-                it.name.contains("spu", ignoreCase = true) ||
-                it.name.contains("subtitle", ignoreCase = true)
-            }
-            trackMethods.forEach { method ->
-                android.util.Log.d(TAG, "[VLC API] ${method.name}(${method.parameterTypes.joinToString { it.simpleName }}): ${method.returnType.simpleName}")
-            }
-        }
+    fun selectAudioTrack(id: Int): Boolean {
+        mediaPlayer?.audioTrack = id
+        return true
     }
 
+    fun selectSubtitleTrack(id: Int): Boolean {
+        mediaPlayer?.spuTrack = id
+        return true
+    }
+
+    fun disableSubtitles() {
+        mediaPlayer?.spuTrack = -1
+    }
+
+    /**
+     * Clear UI listeners and audio focus immediately.
+     * Native teardown is handled via [performNativeRelease].
+     */
     fun release() {
-        if (isReleasing && mediaPlayer == null) {
-            return
-        }
+        if (isReleasing && (mediaPlayer == null)) return
 
-        android.util.Log.d(TAG, "[VLC] release START")
+        Log.d(TAG, "[VLC] release sequence START")
         isReleasing = true
 
-        // Clear all callbacks
         onPlaybackStateChanged = null
         onBufferingChanged = null
         onTimeChanged = null
@@ -550,28 +523,39 @@ class NuvioVlcSurfaceView @JvmOverloads constructor(
         onError = null
         onFirstFrameRendered = null
         onTracksChanged = null
+        
+        abandonAudioFocus()
 
-        if (mediaPlayerInitialized && mediaPlayer != null) {
-            try {
-                mediaPlayer?.setEventListener(null)
-                mediaPlayer?.vlcVout?.removeCallback(this)
-                mediaPlayer?.stop()
-                mediaPlayer?.detachViews()
-                mediaPlayer?.release()
-            } catch (e: Exception) {
-                android.util.Log.e(TAG, "[VLC] release mediaPlayer failed", e)
-            }
+        mediaPlayer?.let { mp ->
+            runCatching { mp.setEventListener(null) }
+            runCatching { mp.vlcVout.removeCallback(this) }
         }
+    }
 
+    /**
+     * Performs blocking native release calls.
+     * MUST be called on a background thread to prevent deadlocks.
+     */
+    fun performNativeRelease() {
+        val mp = mediaPlayer
         mediaPlayer = null
         mediaPlayerInitialized = false
         surfacesCreated = false
-        android.util.Log.d(TAG, "[VLC] release COMPLETE")
+
+        mp?.let { player ->
+            runCatching {
+                player.setEventListener(null)
+                player.vlcVout.removeCallback(this)
+                if (player.isPlaying) player.stop()
+                player.detachViews()
+                player.release()
+            }
+        }
     }
 
     // IVLCVout.Callback implementation
     override fun onSurfacesCreated(vout: IVLCVout?) {
-        android.util.Log.d("NuvioVlcSurfaceView", "[VLC] onSurfacesCreated")
+        Log.d(TAG, "onSurfacesCreated")
         surfacesCreated = true
         if (pendingPlay) {
             pendingPlay = false
@@ -580,7 +564,7 @@ class NuvioVlcSurfaceView @JvmOverloads constructor(
     }
 
     override fun onSurfacesDestroyed(vout: IVLCVout?) {
-        android.util.Log.d("NuvioVlcSurfaceView", "[VLC] onSurfacesDestroyed")
+        Log.d(TAG, "onSurfacesDestroyed")
         surfacesCreated = false
     }
 
@@ -588,4 +572,26 @@ class NuvioVlcSurfaceView @JvmOverloads constructor(
         super.onDetachedFromWindow()
         release()
     }
+
+    companion object {
+        private const val TAG = "NuvioVlcSurfaceView"
+        private const val SUBTITLE_VERTICAL_OFFSET_MIN = -20
+        private const val SUBTITLE_VERTICAL_OFFSET_MAX = 50
+    }
 }
+
+data class VlcTrackSnapshot(
+    val audioTracks: List<VlcTrack>,
+    val subtitleTracks: List<VlcTrack>
+)
+
+data class VlcTrack(
+    val id: Int,
+    val name: String,
+    val language: String?,
+    val codec: String?,
+    val channelCount: Int? = null,
+    val sampleRate: Int? = null,
+    val isForced: Boolean = false,
+    val isSelected: Boolean = false
+)

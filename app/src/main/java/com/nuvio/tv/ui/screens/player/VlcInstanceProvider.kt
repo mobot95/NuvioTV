@@ -3,6 +3,8 @@ package com.nuvio.tv.ui.screens.player
 import android.content.Context
 import android.util.Log
 import com.nuvio.tv.BuildConfig
+import com.nuvio.tv.data.local.PlayerSettings
+import com.nuvio.tv.data.local.VlcHardwareDecodeMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -11,8 +13,9 @@ import kotlinx.coroutines.launch
 import org.videolan.libvlc.LibVLC
 
 /**
- * Provides a shared instance of LibVLC to avoid expensive re-initialization
- * which blocks the UI thread.
+ * Provides a shared instance of LibVLC configured according to app settings.
+ * Re-initialized if core settings change to ensure the native instance
+ * matches user preferences.
  */
 object VlcInstanceProvider {
     private const val TAG = "VlcInstanceProvider"
@@ -26,7 +29,7 @@ object VlcInstanceProvider {
     @Volatile
     private var initFailed = false
 
-    fun get(context: Context): LibVLC {
+    fun get(context: Context, settings: PlayerSettings? = null): LibVLC {
         val current = libVLC
         if (current != null) return current
 
@@ -40,7 +43,7 @@ object VlcInstanceProvider {
                 throw IllegalStateException("LibVLC initialization previously failed. Cannot retry.")
             }
             try {
-                createLibVLC(context).also { libVLC = it }
+                createLibVLC(context, settings).also { libVLC = it }
             } catch (e: Exception) {
                 initFailed = true
                 Log.e(TAG, "LibVLC initialization failed, marking as failed state", e)
@@ -49,19 +52,56 @@ object VlcInstanceProvider {
         }
     }
 
-    private fun createLibVLC(context: Context): LibVLC {
-        Log.d(TAG, "Creating new LibVLC instance")
+    private fun createLibVLC(context: Context, settings: PlayerSettings?): LibVLC {
+        Log.d(TAG, "Creating new LibVLC instance with settings")
         val args = ArrayList<String>().apply {
-            // Only use verbose logging in debug builds to avoid performance impact in production
             if (BuildConfig.DEBUG) {
                 add("-vvv")
+                add("--log-verbose=2")
             }
-            add("--network-caching=1500")
-            add("--file-caching=1500")
-            add("--live-caching=1500")
-            add("--sout-mux-caching=1500")
 
-            // Performance options
+            if (settings != null) {
+                // --- 1. Hardware Decoding Mapping ---
+                when (settings.vlcHardwareDecodeMode) {
+                    VlcHardwareDecodeMode.HARDWARE -> {
+                        add("--codec=mediacodec_ndk,mediacodec_jni,none")
+                    }
+                    VlcHardwareDecodeMode.SOFTWARE -> {
+                        add("--no-mediacodec")
+                    }
+                    VlcHardwareDecodeMode.AUTO -> {
+                        // Default VLC behavior
+                    }
+                }
+
+                // --- 2. Audio Signal Path (Passthrough vs. OpenSLES Safety) ---
+                if (settings.tunnelingEnabled) {
+                    add("--aout=android_audiotrack")
+                    add("--audiotrack-passthrough")
+                } else {
+                    add("--aout=opensles") // Force OpenSLES to bypass DynamicsProcessing crashes
+                }
+
+                // --- 3. Audio Downmix ---
+                if (settings.downmixEnabled) {
+                    add("--stereo-mode=1")
+                }
+
+                // --- 4. Network Caching ---
+                val networkCaching = settings.bufferSettings.minBufferMs.coerceIn(1500, 10000)
+                add("--network-caching=$networkCaching")
+                add("--file-caching=$networkCaching")
+                add("--live-caching=$networkCaching")
+                add("--sout-mux-caching=$networkCaching")
+            } else {
+                // Defaults if settings not provided (fallback)
+                add("--aout=opensles")
+                add("--network-caching=3000")
+            }
+
+            // Stability Defaults
+            add("--audio-resampler=soxr")
+            add("--no-audio-time-stretch")
             add("--drop-late-frames")
             add("--skip-frames")
         }
@@ -69,19 +109,16 @@ object VlcInstanceProvider {
     }
 
     /**
-     * Pre-initializes LibVLC on a background thread to avoid blocking the UI
-     * when the player is first needed.
+     * Pre-initializes LibVLC on a background thread.
      */
     fun preWarm(context: Context) {
         if (libVLC != null) return
-        if (initFailed) {
-            Log.w(TAG, "Skipping preWarm - initialization previously failed")
-            return
-        }
+        if (initFailed) return
+        
         val currentScope = scope
         currentScope.launch {
             try {
-                get(context)
+                get(context, null)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to pre-warm LibVLC", e)
             }
@@ -89,12 +126,8 @@ object VlcInstanceProvider {
     }
 
     /**
-     * Cleans up resources and cancels all pending coroutines.
-     * Should be called when the app is shutting down to prevent coroutine leaks.
-     *
-     * Note: This method resets the initFailed flag to allow retry after cleanup.
-     * This is intentional to support app restart scenarios where a temporary
-     * initialization failure might be resolved after cleanup.
+     * Cleans up resources. 
+     * Mandatory to call when changing core settings that require native re-init.
      */
     fun cleanup() {
         Log.d(TAG, "Cleaning up VlcInstanceProvider")

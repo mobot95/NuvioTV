@@ -55,6 +55,7 @@ import com.nuvio.tv.data.local.AVAILABLE_SUBTITLE_LANGUAGES
 import com.nuvio.tv.data.local.AudioLanguageOption
 import com.nuvio.tv.data.local.AudioOutputChannels
 import com.nuvio.tv.data.local.MpvHardwareDecodeMode
+import com.nuvio.tv.data.local.VlcHardwareDecodeMode
 import com.nuvio.tv.data.local.PlayerSettings
 import com.nuvio.tv.data.local.TrailerSettings
 import com.nuvio.tv.data.local.displayName
@@ -69,6 +70,7 @@ internal fun LazyListScope.trailerAndAudioSettingsItems(
     onShowAudioOutputChannelsDialog: () -> Unit,
     onShowDecoderPriorityDialog: () -> Unit,
     onShowMpvHardwareDecodeModeDialog: () -> Unit,
+    onShowVlcHardwareDecodeModeDialog: () -> Unit,
     onSetTrailerEnabled: (Boolean) -> Unit,
     onSetTrailerDelaySeconds: (Int) -> Unit,
     onSetDownmixEnabled: (Boolean) -> Unit,
@@ -314,6 +316,23 @@ internal fun LazyListScope.trailerAndAudioSettingsItems(
             enabled = enabled
         )
     }
+
+    item(key = "audio_vlc_hardware_decode_mode") {
+        val hwDecodeModeName = when (playerSettings.vlcHardwareDecodeMode) {
+            VlcHardwareDecodeMode.AUTO -> stringResource(R.string.audio_vlc_hwdec_auto)
+            VlcHardwareDecodeMode.HARDWARE -> stringResource(R.string.audio_vlc_hwdec_hardware)
+            VlcHardwareDecodeMode.SOFTWARE -> stringResource(R.string.audio_vlc_hwdec_software)
+        }
+
+        NavigationSettingsItem(
+            icon = Icons.Default.Tune,
+            title = stringResource(R.string.audio_vlc_hwdec_title),
+            subtitle = hwDecodeModeName,
+            onClick = onShowVlcHardwareDecodeModeDialog,
+            onFocused = onItemFocused,
+            enabled = enabled
+        )
+    }
 }
 
 @Composable
@@ -323,21 +342,25 @@ internal fun AudioSettingsDialogs(
     showAudioOutputChannelsDialog: Boolean,
     showDecoderPriorityDialog: Boolean,
     showMpvHardwareDecodeModeDialog: Boolean,
+    showVlcHardwareDecodeModeDialog: Boolean,
     selectedLanguage: String,
     selectedSecondaryLanguage: String?,
     selectedAudioOutputChannels: AudioOutputChannels,
     selectedPriority: Int,
     selectedMpvHardwareDecodeMode: MpvHardwareDecodeMode,
+    selectedVlcHardwareDecodeMode: VlcHardwareDecodeMode,
     onSetPreferredAudioLanguage: (String) -> Unit,
     onSetSecondaryPreferredAudioLanguage: (String?) -> Unit,
     onSetAudioOutputChannels: (AudioOutputChannels) -> Unit,
     onSetDecoderPriority: (Int) -> Unit,
     onSetMpvHardwareDecodeMode: (MpvHardwareDecodeMode) -> Unit,
+    onSetVlcHardwareDecodeMode: (VlcHardwareDecodeMode) -> Unit,
     onDismissAudioLanguageDialog: () -> Unit,
     onDismissSecondaryAudioLanguageDialog: () -> Unit,
     onDismissAudioOutputChannelsDialog: () -> Unit,
     onDismissDecoderPriorityDialog: () -> Unit,
-    onDismissMpvHardwareDecodeModeDialog: () -> Unit
+    onDismissMpvHardwareDecodeModeDialog: () -> Unit,
+    onDismissVlcHardwareDecodeModeDialog: () -> Unit
 ) {
     if (showAudioLanguageDialog) {
         AudioLanguageSelectionDialog(
@@ -393,6 +416,17 @@ internal fun AudioSettingsDialogs(
                 onDismissMpvHardwareDecodeModeDialog()
             },
             onDismiss = onDismissMpvHardwareDecodeModeDialog
+        )
+    }
+
+    if (showVlcHardwareDecodeModeDialog) {
+        VlcHardwareDecodeModeDialog(
+            selectedMode = selectedVlcHardwareDecodeMode,
+            onModeSelected = {
+                onSetVlcHardwareDecodeMode(it)
+                onDismissVlcHardwareDecodeModeDialog()
+            },
+            onDismiss = onDismissVlcHardwareDecodeModeDialog
         )
     }
 }
@@ -548,6 +582,42 @@ private fun MpvHardwareDecodeModeDialog(
     SettingsSingleChoiceDialog(
         title = stringResource(R.string.audio_mpv_hwdec_title),
         subtitle = stringResource(R.string.audio_mpv_hwdec_dialog_subtitle),
+        options = options,
+        selectedValue = selectedMode,
+        onOptionSelected = onModeSelected,
+        onDismiss = onDismiss,
+        width = 460.dp,
+        maxHeight = 360.dp
+    )
+}
+
+@Composable
+private fun VlcHardwareDecodeModeDialog(
+    selectedMode: VlcHardwareDecodeMode,
+    onModeSelected: (VlcHardwareDecodeMode) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val options = listOf(
+        SettingsPickerOption(
+            VlcHardwareDecodeMode.AUTO,
+            stringResource(R.string.audio_vlc_hwdec_auto),
+            stringResource(R.string.audio_vlc_hwdec_auto_desc)
+        ),
+        SettingsPickerOption(
+            VlcHardwareDecodeMode.HARDWARE,
+            stringResource(R.string.audio_vlc_hwdec_hardware),
+            stringResource(R.string.audio_vlc_hwdec_hardware_desc)
+        ),
+        SettingsPickerOption(
+            VlcHardwareDecodeMode.SOFTWARE,
+            stringResource(R.string.audio_vlc_hwdec_software),
+            stringResource(R.string.audio_vlc_hwdec_software_desc)
+        )
+    )
+
+    SettingsSingleChoiceDialog(
+        title = stringResource(R.string.audio_vlc_hwdec_title),
+        subtitle = stringResource(R.string.audio_vlc_hwdec_dialog_subtitle),
         options = options,
         selectedValue = selectedMode,
         onOptionSelected = onModeSelected,

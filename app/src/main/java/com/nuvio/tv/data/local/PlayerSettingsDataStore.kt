@@ -224,6 +224,7 @@ data class PlayerSettings(
     // Dolby Vision Profile 7 → HEVC fallback (requires forked ExoPlayer)
     val mapDV7ToHevc: Boolean = false,
     val mpvHardwareDecodeMode: MpvHardwareDecodeMode = MpvHardwareDecodeMode.AUTO_SAFE,
+    val vlcHardwareDecodeMode: VlcHardwareDecodeMode = VlcHardwareDecodeMode.AUTO,
     // Display settings
     val frameRateMatchingMode: FrameRateMatchingMode = FrameRateMatchingMode.OFF,
     val resolutionMatchingEnabled: Boolean = false,
@@ -313,6 +314,12 @@ enum class MpvHardwareDecodeMode {
     HARDWARE_COPY,
     HARDWARE_DIRECT,
     DISABLED
+}
+
+enum class VlcHardwareDecodeMode {
+    AUTO,
+    HARDWARE,
+    SOFTWARE
 }
 
 enum class AutoSkipSegmentType(val storedValue: String) {
@@ -412,6 +419,7 @@ class PlayerSettingsDataStore @Inject constructor(
     private val autoSkipSegmentTypesKey = stringSetPreferencesKey("auto_skip_segment_types")
     private val mapDV7ToHevcKey = booleanPreferencesKey("map_dv7_to_hevc")
     private val mpvHardwareDecodeModeKey = stringPreferencesKey("mpv_hardware_decode_mode")
+    private val vlcHardwareDecodeModeKey = stringPreferencesKey("vlc_hardware_decode_mode")
     private val frameRateMatchingKey = booleanPreferencesKey("frame_rate_matching")
     private val frameRateMatchingModeKey = stringPreferencesKey("frame_rate_matching_mode")
     private val resolutionMatchingEnabledKey = booleanPreferencesKey("resolution_matching_enabled")
@@ -618,6 +626,7 @@ class PlayerSettingsDataStore @Inject constructor(
                     ?: emptySet(),
                 mapDV7ToHevc = prefs[mapDV7ToHevcKey] ?: false,
                 mpvHardwareDecodeMode = parseMpvHardwareDecodeMode(prefs[mpvHardwareDecodeModeKey]),
+                vlcHardwareDecodeMode = parseVlcHardwareDecodeMode(prefs[vlcHardwareDecodeModeKey]),
                 frameRateMatchingMode = prefs[frameRateMatchingModeKey]?.let {
                     runCatching { FrameRateMatchingMode.valueOf(it) }.getOrNull()
                 } ?: if (prefs[frameRateMatchingKey] == true) {
@@ -1080,6 +1089,15 @@ class PlayerSettingsDataStore @Inject constructor(
         }
     }
 
+    private fun parseVlcHardwareDecodeMode(value: String?): VlcHardwareDecodeMode {
+        return when (value) {
+            null, "AUTO" -> VlcHardwareDecodeMode.AUTO
+            "HARDWARE" -> VlcHardwareDecodeMode.HARDWARE
+            "SOFTWARE" -> VlcHardwareDecodeMode.SOFTWARE
+            else -> VlcHardwareDecodeMode.AUTO
+        }
+    }
+
     private fun normalizeSelectableLanguageCode(language: String): String {
         val code = language.trim().lowercase()
         return when (code) {
@@ -1125,6 +1143,12 @@ class PlayerSettingsDataStore @Inject constructor(
     suspend fun setMpvHardwareDecodeMode(mode: MpvHardwareDecodeMode) {
         store().edit { prefs ->
             prefs[mpvHardwareDecodeModeKey] = mode.name
+        }
+    }
+
+    suspend fun setVlcHardwareDecodeMode(mode: VlcHardwareDecodeMode) {
+        store().edit { prefs ->
+            prefs[vlcHardwareDecodeModeKey] = mode.name
         }
     }
 

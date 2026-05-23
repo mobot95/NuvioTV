@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import com.nuvio.tv.core.plugin.PluginManager
 import com.nuvio.tv.data.local.LibassRenderType
 import com.nuvio.tv.data.local.InternalPlayerEngine
+import com.nuvio.tv.data.local.VlcHardwareDecodeMode
 import com.nuvio.tv.data.local.PlayerSettings
 import com.nuvio.tv.data.local.PlayerSettingsDataStore
 import com.nuvio.tv.data.local.PlayerPreference
@@ -169,6 +170,10 @@ class PlaybackSettingsViewModel @Inject constructor(
 
     suspend fun setMpvHardwareDecodeMode(mode: MpvHardwareDecodeMode) {
         playerSettingsDataStore.setMpvHardwareDecodeMode(mode)
+    }
+
+    suspend fun setVlcHardwareDecodeMode(mode: VlcHardwareDecodeMode) {
+        playerSettingsDataStore.setVlcHardwareDecodeMode(mode)
     }
 
     /**

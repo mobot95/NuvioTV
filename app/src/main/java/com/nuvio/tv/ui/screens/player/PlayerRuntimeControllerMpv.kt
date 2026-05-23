@@ -185,6 +185,7 @@ internal fun PlayerRuntimeController.pauseForLifecycle() {
     }
     if (isUsingVlcEngine()) {
         vlcView?.setPaused(true)
+        vlcView?.abandonAudioFocus()
         stopWatchProgressSaving()
         stopProgressUpdates()
         _uiState.update { it.copy(isPlaying = false) }
@@ -218,8 +219,14 @@ internal fun PlayerRuntimeController.resumeForLifecycle() {
         return
     }
 
+    // VLC resume handling - player remains paused, user must press play
+    if (isUsingVlcEngine()) {
+        // VLC player is already paused and ready, no additional action needed
+        return
+    }
+
     val player = _exoPlayer
-    if (player != null && !isUsingMpvEngine() && !isUsingVlcEngine()) {
+    if (player != null && !isUsingMpvEngine()) {
         // Restore automatic audio focus handling that was disabled in pauseForLifecycle().
         player.setAudioAttributes(player.audioAttributes, true)
 
