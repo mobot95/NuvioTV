@@ -647,6 +647,14 @@
     <string name="audio_mpv_hwdec_hardware_direct_desc">Uses direct hardware decoding. Fastest path on compatible devices.</string>
     <string name="audio_mpv_hwdec_disabled">Disabled (no)</string>
     <string name="audio_mpv_hwdec_disabled_desc">Disables hardware decoding and uses software decoding only.</string>
+    <string name="audio_vlc_hwdec_title">Hardware Decoding (VLC-only)</string>
+    <string name="audio_vlc_hwdec_dialog_subtitle">Select how VLC should use hardware decoders.</string>
+    <string name="audio_vlc_hwdec_auto">Auto</string>
+    <string name="audio_vlc_hwdec_auto_desc">Automatic hardware decoding with fallback to software.</string>
+    <string name="audio_vlc_hwdec_hardware">Hardware</string>
+    <string name="audio_vlc_hwdec_hardware_desc">Hardware decoding only. May fail on unsupported formats.</string>
+    <string name="audio_vlc_hwdec_software">Software</string>
+    <string name="audio_vlc_hwdec_software_desc">Software decoding only. Higher CPU usage but more compatible.</string>
     <string name="audio_decoder_device_only_desc">Only use built-in hardware decoders. Most compatible but may not support all formats.</string>
     <string name="audio_decoder_prefer_device_desc">Use hardware decoders when available, fall back to FFmpeg. Recommended for most devices.</string>
     <string name="audio_decoder_prefer_app_desc">Use FFmpeg decoders when available. Better format support but higher CPU usage.</string>
